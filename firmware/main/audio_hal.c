@@ -30,9 +30,9 @@ static bool s_codec_available = false;
 static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
 
 /* 簡易VAD設定
- * ノイズフロア: rms²≈400M〜500M (ES8311 PGA最小ゲイン時)
- * 発話時: rms²≈1G以上を想定 */
-#define VAD_RMS_SQ_THRESHOLD    1000000000LL  /* 発話検出閾値 (rms²) */
+ * ノイズフロア: rms²≈150〜300 (Philips I2S, PGA +24dB)
+ * 発話時: rms²≈50,000以上 */
+#define VAD_RMS_SQ_THRESHOLD    5000LL  /* 発話検出閾値 (rms²) */
 #define VAD_SPEECH_FRAMES       3             /* 連続発話フレーム数で確定 */
 #define VAD_SILENCE_FRAMES      15            /* 連続無音フレーム数で確定 */
 
@@ -58,7 +58,7 @@ static void i2s_init(void) {
 
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
             I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = I2S_MCLK_GPIO,
@@ -73,6 +73,8 @@ static void i2s_init(void) {
             },
         },
     };
+    /* ES8311はモノラル出力を左チャンネルに配置する */
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx_handle, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_rx_handle, &std_cfg));
@@ -317,12 +319,11 @@ static void mic_raw_task(void *arg) {
 
         bool is_speech = (rms_sq > VAD_RMS_SQ_THRESHOLD);
 
-        /* 1秒ごとにRMS²値をログ出力 (512サンプル@16kHz=32ms → 約31フレーム/秒) */
-        if (++log_counter >= 31) {
+        /* デバッグ: 5秒ごとにRMS²値をログ出力 */
+        if (++log_counter >= 155) {
             log_counter = 0;
-            ESP_LOGI(TAG, "VAD: rms²=%lld thr=%lld speech=%d prev=%d",
-                     (long long)rms_sq, (long long)VAD_RMS_SQ_THRESHOLD,
-                     (int)is_speech, (int)prev_speech);
+            ESP_LOGI(TAG, "VAD: rms²=%lld speech=%d",
+                     (long long)rms_sq, (int)prev_speech);
         }
 
         if (is_speech) {
