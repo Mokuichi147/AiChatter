@@ -1,0 +1,131 @@
+import logging
+import os
+import struct
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from config import settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# WebSocketメッセージタイプ (ESP32 → Server)
+MSG_AUDIO_CHUNK = 0x01
+MSG_EOS = 0x11
+MSG_INTERRUPT = 0x12
+
+# WebSocketメッセージタイプ (Server → ESP32)
+MSG_TTS_CHUNK = 0x02
+MSG_TTS_END = 0x03
+
+HEADER_SIZE = 7  # [type:1][seq:2][payload_len:4]
+
+# エコーモード: 環境変数 ECHO_MODE=1 またはAIモデル未インストール時
+ECHO_MODE = os.environ.get("ECHO_MODE", "0") == "1"
+
+app = FastAPI(title="AiChatter Server")
+
+
+def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
+    return struct.pack(">BHI", msg_type, seq & 0xFFFF, payload_len)
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "mode": "echo" if ECHO_MODE else "ai"}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    await websocket.accept()
+    client_host = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"WebSocket接続: {client_host}")
+
+    pipeline = None
+    if not ECHO_MODE:
+        try:
+            from audio_pipeline import AudioPipeline
+
+            async def send_fn(data: bytes) -> None:
+                await websocket.send_bytes(data)
+
+            pipeline = AudioPipeline(send_fn)
+            logger.info("AIパイプラインモード")
+        except Exception as e:
+            logger.warning(f"AIパイプライン初期化失敗 (エコーモードにフォールバック): {e}")
+
+    if pipeline is None:
+        logger.info("エコーモード (受信音声をそのまま返送)")
+
+    audio_buffer = bytearray()
+    seq_counter = 0
+
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+
+            if len(data) < HEADER_SIZE:
+                logger.warning(f"短すぎるメッセージ: {len(data)}バイト")
+                continue
+
+            msg_type, seq, payload_len = struct.unpack(">BHI", data[:HEADER_SIZE])
+            payload = data[HEADER_SIZE : HEADER_SIZE + payload_len]
+
+            if pipeline:
+                # AIパイプラインモード
+                if msg_type == MSG_AUDIO_CHUNK:
+                    await pipeline.process_audio_chunk(payload)
+                elif msg_type == MSG_EOS:
+                    logger.info(f"EOS受信 (seq={seq})")
+                    await pipeline.process_end_of_speech()
+                elif msg_type == MSG_INTERRUPT:
+                    logger.info(f"バージイン受信 (seq={seq})")
+                    await pipeline.process_interrupt()
+            else:
+                # エコーモード
+                if msg_type == MSG_AUDIO_CHUNK:
+                    audio_buffer.extend(payload)
+                elif msg_type == MSG_EOS:
+                    logger.info(
+                        f"EOS受信 (seq={seq}, バッファ: {len(audio_buffer)}バイト)"
+                    )
+                    # 蓄積した音声をそのままTTSチャンクとして返送
+                    chunk_size = 1024
+                    for i in range(0, len(audio_buffer), chunk_size):
+                        chunk = bytes(audio_buffer[i : i + chunk_size])
+                        seq_counter = (seq_counter + 1) & 0xFFFF
+                        header = make_header(MSG_TTS_CHUNK, seq_counter, len(chunk))
+                        await websocket.send_bytes(header + chunk)
+                    # TTS終了通知
+                    seq_counter = (seq_counter + 1) & 0xFFFF
+                    header = make_header(MSG_TTS_END, seq_counter, 0)
+                    await websocket.send_bytes(header)
+                    logger.info(
+                        f"エコーバック送信完了 ({len(audio_buffer)}バイト)"
+                    )
+                    audio_buffer.clear()
+                elif msg_type == MSG_INTERRUPT:
+                    logger.info(f"バージイン受信 (seq={seq})")
+                    audio_buffer.clear()
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket切断: {client_host}")
+    except Exception as e:
+        logger.error(f"WebSocketエラー: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    mode = "エコー" if ECHO_MODE else "AI"
+    logger.info(f"サーバー起動: {settings.host}:{settings.port} ({mode}モード)")
+    if not ECHO_MODE:
+        logger.info(f"LLMモデル: {settings.llm_model}")
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )

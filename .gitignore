@@ -1,0 +1,28 @@
+# ESP-IDF ビルド成果物
+firmware/build/
+firmware/managed_components/
+firmware/dependencies.lock
+firmware/sdkconfig.old
+firmware/sdkconfig
+firmware/.cache/
+
+# Python
+server/.venv/
+server/__pycache__/
+server/**/__pycache__/
+*.pyc
+
+# TTS/ASRモデル
+server/models/
+
+# 環境設定
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
