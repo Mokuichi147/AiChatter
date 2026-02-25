@@ -134,9 +134,11 @@ static void vad_event_callback(bool voice_detected) {
 
 /**
  * TTS音声チャンク受信コールバック (WebSocket)
+ * 音声データは直接再生バッファへ、ステートマシンには通知のみ
  */
 static void tts_audio_callback(const uint8_t *data, size_t len) {
-    state_machine_post_event(SM_EVENT_WS_TTS_CHUNK, data, len);
+    audio_hal_play_bytes(data, len);
+    state_machine_post_event(SM_EVENT_WS_TTS_CHUNK, NULL, 0);
 }
 
 /**

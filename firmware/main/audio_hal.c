@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "state_machine.h"
 #include "driver/i2c_master.h"   /* 新I2C API (IDF 5.x) */
 #include "driver/i2s_std.h"
 #include "esp_codec_dev.h"
@@ -16,8 +17,8 @@
 
 #define TAG "AUDIO_HAL"
 
-/* 再生用リングバッファサイズ (約500ms分 @ 16kHz, 16bit) */
-#define PLAYBACK_RINGBUF_SIZE   (AUDIO_CHUNK_BYTES * 16)
+/* 再生用リングバッファサイズ (約4秒分 @ 16kHz, 16bit, BYTEBUF使用) */
+#define PLAYBACK_RINGBUF_SIZE   (65536)
 /* AECリファレンス用リングバッファサイズ (約250ms分) */
 #define AEC_REF_RINGBUF_SIZE    (AUDIO_CHUNK_BYTES * 8)
 
@@ -44,6 +45,10 @@ static audio_rx_callback_t  s_rx_cb  = NULL;
 static vad_event_callback_t s_vad_cb = NULL;
 
 static volatile bool s_stop_playback = false;
+static volatile bool s_prebuffer_wait = true;   /* 再生前プリバッファリング中 */
+static volatile bool s_drain_pending = false;   /* TTS_END受信後の排出待ち */
+static volatile bool s_playback_idle = true;    /* 再生バッファが空で待機中 */
+#define PREBUFFER_THRESHOLD  4096  /* プリバッファ閾値 (約125ms分) */
 
 /* --------------------------------------------------------
  * I2Sフルデュプレックス初期化
@@ -255,7 +260,7 @@ static void codec_init(void) {
         {0x17, 0xBF},  /* ADC volume */
         {0x1C, 0x6A},  /* ADC equalizer bypass, DC offset cancel */
         /* DAC設定 */
-        {0x32, 0xBF},  /* DAC volume (0dB) */
+        {0x32, 0xB7},  /* DAC volume (-4dB) AW8737アンプ増幅を考慮 */
         {0x37, 0x08},  /* DAC bypass equalizer */
     };
     bool init_ok = true;
@@ -319,14 +324,25 @@ static void mic_raw_task(void *arg) {
 
         bool is_speech = (rms_sq > VAD_RMS_SQ_THRESHOLD);
 
+        /* SPEAKING/PROCESSING中はVADイベントを抑制
+         * (AECなしのためスピーカー音声がマイクに回り込む) */
+        sm_state_t cur_state = state_machine_get_state();
+        bool vad_suppressed = (cur_state == SM_STATE_SPEAKING ||
+                               cur_state == SM_STATE_PROCESSING);
+
         /* デバッグ: 5秒ごとにRMS²値をログ出力 */
         if (++log_counter >= 155) {
             log_counter = 0;
-            ESP_LOGI(TAG, "VAD: rms²=%lld speech=%d",
-                     (long long)rms_sq, (int)prev_speech);
+            ESP_LOGI(TAG, "VAD: rms²=%lld speech=%d sup=%d",
+                     (long long)rms_sq, (int)prev_speech, (int)vad_suppressed);
         }
 
-        if (is_speech) {
+        if (vad_suppressed) {
+            /* 抑制中はカウンタをリセットして誤検出を防止 */
+            speech_count = 0;
+            silence_count = 0;
+            prev_speech = false;
+        } else if (is_speech) {
             speech_count++;
             silence_count = 0;
             if (speech_count >= VAD_SPEECH_FRAMES && !prev_speech) {
@@ -344,8 +360,8 @@ static void mic_raw_task(void *arg) {
             }
         }
 
-        /* クリーン音声コールバック (生マイクデータ) */
-        if (s_rx_cb && sample_count > 0) {
+        /* クリーン音声コールバック (LISTENING/VAD_SILENCE中のみ送信) */
+        if (s_rx_cb && sample_count > 0 && !vad_suppressed) {
             s_rx_cb(mic_buf, sample_count);
         }
     }
@@ -356,6 +372,9 @@ static void mic_raw_task(void *arg) {
  * 再生バッファ → I2S TX
  * -------------------------------------------------------- */
 static void playback_task(void *arg) {
+    /* ローカルバッファ: リングバッファからコピーしてI2Sへ渡す
+     * (returnItem後のデータ破壊を防止) */
+    static uint8_t local_buf[4096];
     static int16_t silent_buf[AUDIO_CHUNK_SAMPLES];
     memset(silent_buf, 0, sizeof(silent_buf));
 
@@ -371,6 +390,24 @@ static void playback_task(void *arg) {
                 vRingbufferReturnItem(s_playback_buf, item);
             }
             s_stop_playback = false;
+            s_prebuffer_wait = true;
+            s_drain_pending = false;
+            s_playback_idle = true;
+        }
+
+        /* プリバッファリング中: 十分なデータが溜まるまで無音を送信 */
+        if (s_prebuffer_wait) {
+            size_t free_size = xRingbufferGetCurFreeSize(s_playback_buf);
+            size_t buffered = PLAYBACK_RINGBUF_SIZE - free_size;
+            if (buffered >= PREBUFFER_THRESHOLD) {
+                ESP_LOGI(TAG, "プリバッファ完了 (%zu bytes)、再生開始", buffered);
+                s_prebuffer_wait = false;
+                s_playback_idle = false;
+            } else {
+                i2s_channel_write(s_tx_handle, silent_buf, AUDIO_CHUNK_BYTES,
+                                  &bytes_written, pdMS_TO_TICKS(20));
+                continue;
+            }
         }
 
         size_t received = 0;
@@ -378,11 +415,25 @@ static void playback_task(void *arg) {
             s_playback_buf, &received, pdMS_TO_TICKS(20), AUDIO_CHUNK_BYTES);
 
         if (data && received > 0) {
-            i2s_channel_write(s_tx_handle, data, received,
-                              &bytes_written, pdMS_TO_TICKS(100));
-            vRingbufferReturnItem(s_playback_buf, data);
+            s_playback_idle = false;
+            /* 偶数バイトアライメント保証 (int16_t境界ズレによる音割れ防止) */
+            size_t play_len = received & ~1u;
+            if (play_len > 0) {
+                memcpy(local_buf, data, play_len);
+                vRingbufferReturnItem(s_playback_buf, data);
+                i2s_channel_write(s_tx_handle, local_buf, play_len,
+                                  &bytes_written, pdMS_TO_TICKS(100));
+            } else {
+                vRingbufferReturnItem(s_playback_buf, data);
+            }
         } else {
-            /* 無音を送信して I2S クロックを維持 */
+            /* バッファ空: drain_pending中なら再生完了 */
+            if (s_drain_pending) {
+                s_playback_idle = true;
+                s_drain_pending = false;
+                s_prebuffer_wait = true;
+                ESP_LOGI(TAG, "再生排出完了 → アイドル");
+            }
             i2s_channel_write(s_tx_handle, silent_buf, AUDIO_CHUNK_BYTES,
                               &bytes_written, pdMS_TO_TICKS(20));
         }
@@ -423,17 +474,41 @@ void audio_hal_init(audio_rx_callback_t rx_cb, vad_event_callback_t vad_cb) {
 void audio_hal_play_bytes(const uint8_t *data, size_t len) {
     if (!data || len == 0) return;
 
-    if (xRingbufferSend(s_playback_buf, data, len,
-                        pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGW(TAG, "再生バッファ満杯: %zu バイト破棄", len);
+    /* PCMデータは偶数バイト (int16_t) でなければならない */
+    size_t aligned_len = len & ~1u;
+    if (aligned_len == 0) return;
+
+    s_playback_idle = false;
+
+    if (xRingbufferSend(s_playback_buf, data, aligned_len,
+                        pdMS_TO_TICKS(2000)) != pdTRUE) {
+        ESP_LOGW(TAG, "再生バッファ満杯: %zu バイト破棄", aligned_len);
         return;
     }
 
     /* AEC リファレンスにも同じデータを供給 */
-    xRingbufferSend(s_aec_ref_buf, data, len, pdMS_TO_TICKS(10));
+    xRingbufferSend(s_aec_ref_buf, data, aligned_len, pdMS_TO_TICKS(10));
 }
 
 void audio_hal_stop_playback(void) {
     s_stop_playback = true;
     ESP_LOGI(TAG, "再生停止要求");
+}
+
+void audio_hal_notify_tts_end(void) {
+    /* TTS_END受信: 排出待ちフラグを立てる。
+     * playback_taskがバッファ空を検出した時点で再生完了となる。
+     * 既にプリバッファ待ち(=バッファ空)なら即完了。 */
+    if (s_prebuffer_wait) {
+        s_playback_idle = true;
+        ESP_LOGI(TAG, "TTS終了通知 → バッファ空、即アイドル");
+    } else {
+        s_drain_pending = true;
+        ESP_LOGI(TAG, "TTS終了通知 → 排出待ち開始");
+    }
+}
+
+bool audio_hal_playback_done(void) {
+    if (!s_playback_buf) return true;
+    return s_playback_idle;
 }

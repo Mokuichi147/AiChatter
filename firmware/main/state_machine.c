@@ -24,6 +24,7 @@ typedef struct {
 
 static QueueHandle_t  s_event_queue  = NULL;
 static TimerHandle_t  s_silence_timer = NULL;
+static TimerHandle_t  s_playback_timer = NULL;
 static volatile sm_state_t s_state   = SM_STATE_IDLE;
 
 /* --------------------------------------------------------
@@ -59,6 +60,15 @@ static void set_state(sm_state_t new_state) {
 static void silence_timer_cb(TimerHandle_t timer) {
     sm_message_t msg = {.event = SM_EVENT_VAD_SILENCE_TIMEOUT, .data_len = 0};
     xQueueSend(s_event_queue, &msg, 0);
+}
+
+/* 再生完了ポーリングタイマーコールバック (100msごと) */
+static void playback_timer_cb(TimerHandle_t timer) {
+    if (audio_hal_playback_done()) {
+        sm_message_t msg = {.event = SM_EVENT_PLAYBACK_DONE, .data_len = 0};
+        xQueueSend(s_event_queue, &msg, 0);
+    }
+    /* まだ再生中の場合はタイマーが自動リロードで再実行される */
 }
 
 /* --------------------------------------------------------
@@ -99,11 +109,12 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         /* ---- PROCESSING: AI処理待ち ---- */
         case SM_STATE_PROCESSING:
             if (event == SM_EVENT_WS_TTS_CHUNK) {
-                /* 最初のTTS音声チャンクが届いたら再生開始 */
-                if (data && data_len > 0) {
-                    audio_hal_play_bytes(data, data_len);
-                }
+                /* 最初のTTS音声チャンク通知 → 再生状態へ
+                 * (音声データはmain.cのコールバックで直接再生バッファへ) */
                 set_state(SM_STATE_SPEAKING);
+            } else if (event == SM_EVENT_WS_TTS_END) {
+                /* ASR空結果等でTTSなし → 待機へ */
+                set_state(SM_STATE_IDLE);
             }
             break;
 
@@ -111,16 +122,18 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         case SM_STATE_SPEAKING:
             if (event == SM_EVENT_VAD_START) {
                 /* バージイン: 再生停止 → 割り込み送信 → 録音へ */
+                xTimerStop(s_playback_timer, 0);
                 audio_hal_stop_playback();
                 ws_client_send_interrupt();
                 set_state(SM_STATE_LISTENING);
             } else if (event == SM_EVENT_WS_TTS_CHUNK) {
-                /* 後続のTTS音声チャンクを再生 */
-                if (data && data_len > 0) {
-                    audio_hal_play_bytes(data, data_len);
-                }
+                /* 後続チャンク: 状態維持のみ (データは直接再生バッファへ) */
             } else if (event == SM_EVENT_WS_TTS_END) {
-                /* TTS完了: 待機へ */
+                /* TTS受信完了: 再生バッファが空になるまで待つ */
+                xTimerStart(s_playback_timer, 0);
+            } else if (event == SM_EVENT_PLAYBACK_DONE) {
+                /* 再生完了: 待機へ */
+                xTimerStop(s_playback_timer, 0);
                 set_state(SM_STATE_IDLE);
             }
             break;
@@ -158,6 +171,17 @@ void state_machine_init(void) {
         silence_timer_cb);
     if (!s_silence_timer) {
         ESP_LOGE(TAG, "タイマー確保失敗");
+        return;
+    }
+
+    s_playback_timer = xTimerCreate(
+        "playback_timer",
+        pdMS_TO_TICKS(100),
+        pdTRUE,        /* 自動リロード (ポーリング) */
+        NULL,
+        playback_timer_cb);
+    if (!s_playback_timer) {
+        ESP_LOGE(TAG, "再生タイマー確保失敗");
         return;
     }
 

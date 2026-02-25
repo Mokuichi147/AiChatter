@@ -29,9 +29,28 @@ ECHO_MODE = os.environ.get("ECHO_MODE", "0") == "1"
 
 app = FastAPI(title="AiChatter Server")
 
+# プリロード済みAIモデル（サーバー起動時に初期化）
+_asr = None
+_llm = None
+_tts = None
+
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
     return struct.pack(">BHI", msg_type, seq & 0xFFFF, payload_len)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    global _asr, _llm, _tts
+    if not ECHO_MODE:
+        logger.info("AIモデルをプリロード中...")
+        from local_asr import LocalASR
+        from local_llm import LocalLLM
+        from local_tts import LocalTTS
+        _asr = LocalASR()
+        _llm = LocalLLM()
+        _tts = LocalTTS()
+        logger.info("AIモデルプリロード完了")
 
 
 @app.get("/health")
@@ -46,14 +65,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     logger.info(f"WebSocket接続: {client_host}")
 
     pipeline = None
-    if not ECHO_MODE:
+    if not ECHO_MODE and _asr and _llm and _tts:
         try:
             from audio_pipeline import AudioPipeline
 
             async def send_fn(data: bytes) -> None:
                 await websocket.send_bytes(data)
 
-            pipeline = AudioPipeline(send_fn)
+            pipeline = AudioPipeline(send_fn, _asr, _llm, _tts)
             logger.info("AIパイプラインモード")
         except Exception as e:
             logger.warning(f"AIパイプライン初期化失敗 (エコーモードにフォールバック): {e}")

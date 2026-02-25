@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio_hal.h"
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
@@ -59,13 +60,22 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
                                        ((uint32_t)buf[4] << 16) |
                                        ((uint32_t)buf[5] << 8) | buf[6];
 
+                /* 受信データ長でバウンドチェック (バッファ外読み出し防止) */
+                size_t available = (size_t)data->data_len - HEADER_SIZE;
+                if (payload_len > available) {
+                    ESP_LOGW(TAG, "ペイロード切り詰め: header=%lu actual=%zu",
+                             (unsigned long)payload_len, available);
+                    payload_len = available;
+                }
+
                 if (msg_type == 0x02) {
                     /* TTS音声チャンク */
                     if (s_tts_cb && payload_len > 0) {
                         s_tts_cb(buf + HEADER_SIZE, payload_len);
                     }
                 } else if (msg_type == 0x03) {
-                    /* TTS終了 */
+                    /* TTS終了: バッファ排出待ち開始 */
+                    audio_hal_notify_tts_end();
                     if (s_end_cb) {
                         s_end_cb();
                     }
@@ -88,8 +98,9 @@ void ws_client_init(const char *uri, tts_audio_callback_t tts_cb,
     esp_websocket_client_config_t cfg = {
         .uri = uri,
         .reconnect_timeout_ms = 3000,
-        .network_timeout_ms = 10000,
+        .network_timeout_ms = 120000,
         .buffer_size = 65536,
+        .ping_interval_sec = 15,
     };
 
     s_client = esp_websocket_client_init(&cfg);

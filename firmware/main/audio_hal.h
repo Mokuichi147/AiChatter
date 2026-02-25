@@ -50,3 +50,14 @@ void audio_hal_play_bytes(const uint8_t *data, size_t len);
  * @brief スピーカー再生を即座に停止する (バージイン時に呼ぶ)
  */
 void audio_hal_stop_playback(void);
+
+/**
+ * @brief TTS終了通知: 残りのバッファを再生し切ってから完了とする
+ */
+void audio_hal_notify_tts_end(void);
+
+/**
+ * @brief 再生バッファが空かどうかを返す
+ * @return true=バッファが空 (再生完了), false=再生中
+ */
+bool audio_hal_playback_done(void);

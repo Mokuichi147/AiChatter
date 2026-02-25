@@ -21,13 +21,17 @@ def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
 
 
 class AudioPipeline:
-    def __init__(self, send_fn: Callable[[bytes], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        send_fn: Callable[[bytes], Awaitable[None]],
+        asr: LocalASR,
+        llm: LocalLLM,
+        tts: LocalTTS,
+    ) -> None:
         self.send_fn = send_fn
-
-        # AIモデルを初期化（起動時にロードしてレイテンシを下げる）
-        self.asr = LocalASR()
-        self.llm = LocalLLM()
-        self.tts = LocalTTS()
+        self.asr = asr
+        self.llm = llm
+        self.tts = tts
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
@@ -81,7 +85,9 @@ class AudioPipeline:
             text = await loop.run_in_executor(None, self.asr.transcribe, audio_data)
 
             if not text:
-                logger.info("ASR: 空の認識結果、スキップ")
+                logger.info("ASR: 空の認識結果、TTS_END送信")
+                header = make_header(MSG_TTS_END, self._next_seq(), 0)
+                await self.send_fn(header)
                 return
 
             logger.info(f"ASR認識: '{text}'")
@@ -97,7 +103,7 @@ class AudioPipeline:
                 full_response += sentence
                 logger.info(f"TTS合成: '{sentence}'")
 
-                # 文単位でTTS合成してストリーミング送信（レイテンシ削減）
+                # TTS一括生成してすぐに送信
                 chunks = await loop.run_in_executor(
                     None,
                     lambda s=sentence: list(self.tts.synthesize_chunks(s)),
@@ -106,9 +112,15 @@ class AudioPipeline:
                 for chunk in chunks:
                     if self._interrupted:
                         break
-
-                    header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(chunk))
-                    await self.send_fn(header + chunk)
+                    MAX_CHUNK = 4096
+                    offset = 0
+                    while offset < len(chunk):
+                        part = chunk[offset:offset + MAX_CHUNK]
+                        header = make_header(
+                            MSG_TTS_CHUNK, self._next_seq(), len(part)
+                        )
+                        await self.send_fn(header + part)
+                        offset += MAX_CHUNK
 
             if not self._interrupted:
                 # TTS終了通知

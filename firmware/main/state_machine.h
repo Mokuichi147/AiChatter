@@ -23,6 +23,7 @@ typedef enum {
     SM_EVENT_VAD_SILENCE_TIMEOUT, /**< 無音タイムアウト → EOS送信 */
     SM_EVENT_WS_TTS_CHUNK,        /**< サーバーからTTS音声受信 */
     SM_EVENT_WS_TTS_END,          /**< サーバーからTTS終了受信 */
+    SM_EVENT_PLAYBACK_DONE,       /**< 再生バッファ空 (再生完了) */
 } sm_event_t;
 
 /**
