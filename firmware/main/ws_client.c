@@ -16,6 +16,13 @@ static esp_websocket_client_handle_t s_client = NULL;
 static tts_audio_callback_t s_tts_cb = NULL;
 static tts_end_callback_t s_end_cb = NULL;
 static uint16_t s_seq = 0;
+static uint8_t s_current_msg_type = 0;  /* フレーム分割配信時のメッセージタイプ保持 */
+
+/* フレーム再組立バッファ (分割配信対策) */
+#define REASSEMBLY_BUF_SIZE  (4096 + HEADER_SIZE)
+static uint8_t s_reassembly_buf[REASSEMBLY_BUF_SIZE];
+static size_t  s_reassembly_len = 0;
+static size_t  s_reassembly_expected = 0;  /* ヘッダから読んだペイロード長 */
 
 /* ヘッダー生成: ビッグエンディアン */
 static void make_header(uint8_t *buf, uint8_t type, uint16_t seq,
@@ -49,38 +56,74 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_DATA:
             /* バイナリフレームのみ処理 (op_code=2) */
-            if (data->op_code != 2 || data->data_len < HEADER_SIZE) {
-                break;
-            }
+            if (data->op_code != 2) break;
 
             {
                 const uint8_t *buf = (const uint8_t *)data->data_ptr;
-                uint8_t msg_type = buf[0];
-                uint32_t payload_len = ((uint32_t)buf[3] << 24) |
-                                       ((uint32_t)buf[4] << 16) |
-                                       ((uint32_t)buf[5] << 8) | buf[6];
+                size_t len = data->data_len;
 
-                /* 受信データ長でバウンドチェック (バッファ外読み出し防止) */
-                size_t available = (size_t)data->data_len - HEADER_SIZE;
-                if (payload_len > available) {
-                    ESP_LOGW(TAG, "ペイロード切り詰め: header=%lu actual=%zu",
-                             (unsigned long)payload_len, available);
-                    payload_len = available;
-                }
+                /* フレーム分割配信対策:
+                 * esp_websocket_clientはbuffer_sizeより大きなフレームや
+                 * TCP分割により複数イベントに分けて配信することがある。
+                 * 再組立バッファで完全なメッセージを構築してから処理する。 */
 
-                if (msg_type == 0x02) {
-                    /* TTS音声チャンク */
-                    if (s_tts_cb && payload_len > 0) {
-                        s_tts_cb(buf + HEADER_SIZE, payload_len);
+                if (data->payload_offset == 0) {
+                    /* 新しいフレーム開始 */
+                    s_reassembly_len = 0;
+                    s_reassembly_expected = 0;
+
+                    if (len < HEADER_SIZE) break;
+
+                    uint8_t msg_type = buf[0];
+                    s_current_msg_type = msg_type;
+
+                    uint32_t payload_len = ((uint32_t)buf[3] << 24) |
+                                           ((uint32_t)buf[4] << 16) |
+                                           ((uint32_t)buf[5] << 8) | buf[6];
+
+                    if (msg_type == 0x03) {
+                        /* TTS終了 (ペイロードなし) */
+                        audio_hal_notify_tts_end();
+                        if (s_end_cb) s_end_cb();
+                        break;
                     }
-                } else if (msg_type == 0x03) {
-                    /* TTS終了: バッファ排出待ち開始 */
-                    audio_hal_notify_tts_end();
-                    if (s_end_cb) {
-                        s_end_cb();
+
+                    if (msg_type != 0x02) break;
+
+                    /* ペイロードを再組立バッファにコピー */
+                    size_t avail = len - HEADER_SIZE;
+                    size_t copy = avail;
+                    if (copy > REASSEMBLY_BUF_SIZE) copy = REASSEMBLY_BUF_SIZE;
+                    memcpy(s_reassembly_buf, buf + HEADER_SIZE, copy);
+                    s_reassembly_len = copy;
+                    s_reassembly_expected = payload_len;
+
+                    /* フレームが1イベントで完結した場合は即送信 */
+                    if (s_reassembly_len >= s_reassembly_expected) {
+                        if (s_tts_cb && s_reassembly_len > 0) {
+                            s_tts_cb(s_reassembly_buf, s_reassembly_len);
+                        }
+                        s_reassembly_len = 0;
+                        s_reassembly_expected = 0;
                     }
                 } else {
-                    ESP_LOGD(TAG, "不明なサーバーメッセージ: 0x%02X", msg_type);
+                    /* 分割フレームの続き */
+                    if (s_current_msg_type != 0x02 || s_reassembly_expected == 0) break;
+
+                    size_t remain = REASSEMBLY_BUF_SIZE - s_reassembly_len;
+                    size_t copy = len;
+                    if (copy > remain) copy = remain;
+                    memcpy(s_reassembly_buf + s_reassembly_len, buf, copy);
+                    s_reassembly_len += copy;
+
+                    /* 全データ受信完了 */
+                    if (s_reassembly_len >= s_reassembly_expected) {
+                        if (s_tts_cb && s_reassembly_len > 0) {
+                            s_tts_cb(s_reassembly_buf, s_reassembly_len);
+                        }
+                        s_reassembly_len = 0;
+                        s_reassembly_expected = 0;
+                    }
                 }
             }
             break;

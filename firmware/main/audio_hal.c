@@ -421,6 +421,19 @@ static void playback_task(void *arg) {
             if (play_len > 0) {
                 memcpy(local_buf, data, play_len);
                 vRingbufferReturnItem(s_playback_buf, data);
+
+                /* デバッグ: PCMピーク検出 (データ破損の検出) */
+                int16_t *samples = (int16_t *)local_buf;
+                size_t n = play_len / 2;
+                int16_t peak = 0;
+                for (size_t i = 0; i < n; i++) {
+                    int16_t v = samples[i] < 0 ? -samples[i] : samples[i];
+                    if (v > peak) peak = v;
+                }
+                if (peak > 20000) {
+                    ESP_LOGW(TAG, "PCMピーク異常: %d (len=%zu)", peak, play_len);
+                }
+
                 i2s_channel_write(s_tx_handle, local_buf, play_len,
                                   &bytes_written, pdMS_TO_TICKS(100));
             } else {
@@ -477,6 +490,18 @@ void audio_hal_play_bytes(const uint8_t *data, size_t len) {
     /* PCMデータは偶数バイト (int16_t) でなければならない */
     size_t aligned_len = len & ~1u;
     if (aligned_len == 0) return;
+
+    /* デバッグ: 受信PCMピーク検出 */
+    const int16_t *samples = (const int16_t *)data;
+    size_t n = aligned_len / 2;
+    int16_t peak = 0;
+    for (size_t i = 0; i < n; i++) {
+        int16_t v = samples[i] < 0 ? -samples[i] : samples[i];
+        if (v > peak) peak = v;
+    }
+    if (peak > 20000) {
+        ESP_LOGW(TAG, "受信PCMピーク異常: %d (len=%zu)", peak, aligned_len);
+    }
 
     s_playback_idle = false;
 

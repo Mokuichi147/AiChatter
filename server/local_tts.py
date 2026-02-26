@@ -35,27 +35,14 @@ class LocalTTS:
             f"サンプルレート: {self.model_sample_rate}Hz)"
         )
 
-    def _to_pcm(self, audio_mx) -> bytes:
-        """mx.array音声をリサンプリング+PCM変換"""
-        audio_np = np.array(audio_mx, dtype=np.float32)
-
-        # リサンプリング (モデル出力 → 16kHz)
-        if self.model_sample_rate != TARGET_SAMPLE_RATE:
-            audio_np = self._resample(
-                audio_np, TARGET_SAMPLE_RATE, self.model_sample_rate
-            ).astype(np.float32)
-
-        # クリッピング
-        audio_np = np.clip(audio_np, -1.0, 1.0)
-        return (audio_np * VOLUME_SCALE).astype(np.int16).tobytes()
-
     def synthesize_chunks(self, text: str) -> Iterator[bytes]:
-        """バッチTTS: 一括生成してチャンクを返す"""
+        """バッチTTS: 全音声を結合→一括リサンプル→PCM変換"""
         if not text.strip():
             return
 
         try:
-            all_pcm = bytearray()
+            # モデルから全音声セグメントを収集
+            segments = []
             for result in self.model.generate(
                 text=text,
                 voice=settings.tts_voice,
@@ -63,13 +50,27 @@ class LocalTTS:
             ):
                 if result.audio is None:
                     continue
-                pcm = self._to_pcm(result.audio)
-                if len(pcm) > 0:
-                    all_pcm.extend(pcm)
-                    yield pcm
+                segments.append(np.array(result.audio, dtype=np.float32))
+
+            if not segments:
+                return
+
+            # 全セグメントを結合して一括リサンプル (境界アーティファクト防止)
+            audio_np = np.concatenate(segments)
+
+            if self.model_sample_rate != TARGET_SAMPLE_RATE:
+                audio_np = self._resample(
+                    audio_np, TARGET_SAMPLE_RATE, self.model_sample_rate
+                ).astype(np.float32)
+
+            audio_np = np.clip(audio_np, -1.0, 1.0)
+            pcm = (audio_np * VOLUME_SCALE).astype(np.int16).tobytes()
+
+            if not pcm:
+                return
 
             # デバッグ: PCMデータをWAVファイルに保存
-            if _DEBUG_DUMP and all_pcm:
+            if _DEBUG_DUMP:
                 global _debug_counter
                 _debug_counter += 1
                 path = f"/tmp/tts_debug_{_debug_counter}.wav"
@@ -77,7 +78,10 @@ class LocalTTS:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(TARGET_SAMPLE_RATE)
-                    wf.writeframes(bytes(all_pcm))
-                logger.info(f"デバッグ: TTS出力保存 → {path} ({len(all_pcm)} bytes)")
+                    wf.writeframes(pcm)
+                logger.info(f"デバッグ: TTS出力保存 → {path} ({len(pcm)} bytes)")
+
+            yield pcm
+
         except Exception as e:
             logger.error(f"TTS合成エラー: {e}", exc_info=True)
