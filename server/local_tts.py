@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Iterator
 
@@ -12,6 +13,13 @@ logger = logging.getLogger(__name__)
 TARGET_SAMPLE_RATE = 16000  # ESP32側の受信サンプルレート
 VOLUME_SCALE = 4096  # 音量スケール (12.5%)
 VOICES_DIR = Path(__file__).parent / "voices"
+
+# TTS合成可能な文字のみ残す (日本語・英数字・句読点・記号)
+_SPEAKABLE_RE = re.compile(
+    r"[^\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF"
+    r"a-zA-Zａ-ｚＡ-Ｚ0-9０-９"
+    r"、。！？,.!?ー〜…―\-\s]"
+)
 
 
 class LocalTTS:
@@ -110,7 +118,9 @@ class LocalTTS:
 
     def synthesize_chunks(self, text: str) -> Iterator[bytes]:
         """バッチTTS: 全音声を結合→一括リサンプル→PCM変換"""
-        if not text.strip():
+        # 絵文字等TTS不可文字を除去
+        text = _SPEAKABLE_RE.sub("", text).strip()
+        if not text:
             return
 
         try:
