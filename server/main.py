@@ -84,6 +84,7 @@ async def startup_event() -> None:
                 MemoryStore,
                 SaveMemoryTool,
                 SearchMemoryTool,
+                DeleteMemoryTool,
             )
             from tools.voice_control import SetVolumeTool
             from tools.search import SearchTool
@@ -98,6 +99,7 @@ async def startup_event() -> None:
             memory_store = MemoryStore(settings.memory_file)
             _tool_registry.register(SaveMemoryTool(memory_store))
             _tool_registry.register(SearchMemoryTool(memory_store))
+            _tool_registry.register(DeleteMemoryTool(memory_store))
             _tool_registry.register(SetVolumeTool(_tts))
             _tool_registry.register(SearchTool())
 
