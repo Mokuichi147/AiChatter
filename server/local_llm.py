@@ -4,7 +4,7 @@ from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
-from config import settings
+from config import character, settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ class LocalLLM:
         text: str,
         history: list[dict],
     ) -> AsyncIterator[str]:
-        messages = [{"role": "system", "content": settings.system_prompt}]
+        system_prompt = character.persona.system_prompt or settings.system_prompt
+        messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": text})
 
