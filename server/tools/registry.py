@@ -39,6 +39,9 @@ class ToolRegistry:
     def to_openai_tools(self) -> list[dict]:
         return [tool.to_openai_tool() for tool in self._tools.values()]
 
+    def to_mcp_tools(self) -> list[dict]:
+        return [tool.to_mcp_tool() for tool in self._tools.values()]
+
     @property
     def is_empty(self) -> bool:
         return len(self._tools) == 0

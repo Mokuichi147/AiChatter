@@ -193,6 +193,11 @@ class AudioPipeline:
                 "先にlist_notificationsでIDを確認してください。\n"
                 "- set_sleep: デバイスをスリープさせます。「おやすみ」等の"
                 "就寝の挨拶を受けたら積極的に使ってください。\n"
+                "- run_subagent_research: 時間がかかる調査をバックグラウンドで開始します。"
+                "Web検索やメモリ検索を複数回行う詳細調査に使います。\n"
+                "- list_subagent_jobs: サブエージェントジョブの進捗を確認します。\n"
+                "- get_subagent_job: 完了ジョブの結果を取得します。"
+                "結果をユーザーに伝えるかどうかは、会話文脈を見てあなたが判断してください。\n"
             )
 
         if extra_instruction:

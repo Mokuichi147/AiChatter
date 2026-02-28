@@ -89,6 +89,7 @@ class Settings(BaseSettings):
 
     # LLM (OpenAI互換API)
     llm_model: str = "glm-5:cloud"
+    llm_sub_model: str = ""
     llm_base_url: str = "http://localhost:11434/v1"
     llm_api_key: str = "ollama"
 
@@ -107,6 +108,11 @@ class Settings(BaseSettings):
     tools_enabled: bool = True
     memory_file: str = "data/memory.json"
     tavily_api_key: str = ""
+    subagent_enabled: bool = True
+    subagent_max_rounds: int = 8
+    subagent_timeout_sec: int = 45
+    subagent_mcp_tool_denylist: str = ""
+    subagent_result_max_chars: int = 4000
 
     # 会話履歴の永続化
     history_file: str = "data/history.json"

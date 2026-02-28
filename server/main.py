@@ -38,6 +38,7 @@ _tts = None
 _tool_registry = None
 _notification_store = None
 _memory_store = None
+_subagent_job_manager = None
 
 # アクティブなパイプライン管理
 _active_pipelines: list = []
@@ -68,7 +69,7 @@ async def _notification_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store
+    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager
     if not ECHO_MODE:
         logger.info("AIモデルをプリロード中...")
         from local_asr import LocalASR
@@ -112,6 +113,41 @@ async def startup_event() -> None:
             _tool_registry.register(ListNotificationsTool(_notification_store))
             _tool_registry.register(DeleteNotificationTool(_notification_store))
             _tool_registry.register(SetSleepTool(lambda: _active_pipelines))
+
+            if settings.subagent_enabled:
+                from subagent.job_manager import SubAgentJobManager
+                from subagent.runner import SubAgentRunner
+                from subagent.tool_adapter import SubAgentToolAdapter
+                from subagent_llm import SubAgentLLM
+                from tools.subagent_research import (
+                    GetSubAgentJobTool,
+                    ListSubAgentJobsTool,
+                    RunSubAgentResearchTool,
+                )
+
+                subagent_llm = SubAgentLLM()
+                tool_adapter = SubAgentToolAdapter(
+                    _tool_registry,
+                    settings.subagent_mcp_tool_denylist,
+                )
+                runner = SubAgentRunner(
+                    llm=subagent_llm,
+                    tool_adapter=tool_adapter,
+                    max_rounds=settings.subagent_max_rounds,
+                    result_max_chars=settings.subagent_result_max_chars,
+                )
+                _subagent_job_manager = SubAgentJobManager(
+                    runner,
+                    timeout_sec=settings.subagent_timeout_sec,
+                )
+
+                _tool_registry.register(
+                    RunSubAgentResearchTool(_subagent_job_manager)
+                )
+                _tool_registry.register(ListSubAgentJobsTool(_subagent_job_manager))
+                _tool_registry.register(GetSubAgentJobTool(_subagent_job_manager))
+                logger.info("サブエージェント機能初期化完了")
+
             logger.info("ツールレジストリ初期化完了")
 
         # 通知スケジューラー起動
