@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     tools_enabled: bool = True
     memory_file: str = "data/memory.json"
 
+    # 会話履歴の永続化
+    history_file: str = "data/history.json"
+    history_restore_count: int = 3
+
     # サーバー設定
     host: str = "0.0.0.0"
     port: int = 8765

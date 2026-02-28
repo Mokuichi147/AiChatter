@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import struct
+from datetime import datetime
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from local_asr import LocalASR
@@ -41,9 +43,45 @@ class AudioPipeline:
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
-        self._history: list[dict] = []
+        self._history: list[dict] = self._load_history()
         self._interrupted: bool = False
         self._current_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _history_path() -> Path:
+        path = Path(settings.history_file)
+        if not path.is_absolute():
+            path = Path(__file__).parent / path
+        return path
+
+    @staticmethod
+    def _load_history() -> list[dict]:
+        """永続化された会話履歴から直近N往復を復元する。"""
+        path = AudioPipeline._history_path()
+        if not path.exists():
+            return []
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+            # 直近N往復(=2*N メッセージ)を復元
+            count = settings.history_restore_count * 2
+            restored = entries[-count:] if len(entries) > count else entries
+            logger.info(f"会話履歴を復元: {len(restored) // 2}往復 ({path})")
+            return restored
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"会話履歴の読み込み失敗: {e}")
+            return []
+
+    def _save_history(self) -> None:
+        """会話履歴をJSONファイルに永続化する。"""
+        path = self._history_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.write_text(
+                json.dumps(self._history, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.warning(f"会話履歴の保存失敗: {e}")
 
     def _next_seq(self) -> int:
         self._seq = (self._seq + 1) & 0xFFFF
@@ -117,6 +155,12 @@ class AudioPipeline:
 
             # --- メッセージ組み立て ---
             system_prompt = character.persona.system_prompt or settings.system_prompt
+
+            # コンテキスト変数を展開
+            now = datetime.now()
+            system_prompt = system_prompt.replace(
+                "{{DATETIME}}", now.strftime("%Y年%m月%d日 %H:%M")
+            )
 
             # ツール有効時はメモリ活用の指示を追加
             if (
@@ -216,6 +260,7 @@ class AudioPipeline:
                 )
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
+                self._save_history()
 
         except asyncio.CancelledError:
             logger.info("パイプラインタスクキャンセル")
