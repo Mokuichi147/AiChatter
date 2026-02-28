@@ -35,6 +35,33 @@ class LocalLLM:
         # 文末句読点で分割（TTS単位を小さくして初期応答を早める）
         self._sentence_pattern = re.compile(r"(?<=[。！？\.\!\?])\s*")
 
+    @staticmethod
+    def _strip_think_tags(text: str, in_think: bool) -> tuple[str, bool]:
+        """テキストから<think>...</think>タグ部分を除去する。
+
+        Returns:
+            (除去済みテキスト, thinkタグ内にいるかのフラグ)
+        """
+        result: list[str] = []
+        pos = 0
+        while pos < len(text):
+            if in_think:
+                end = text.find("</think>", pos)
+                if end == -1:
+                    # タグが閉じていない → 残り全部破棄
+                    break
+                pos = end + len("</think>")
+                in_think = False
+            else:
+                start = text.find("<think>", pos)
+                if start == -1:
+                    result.append(text[pos:])
+                    break
+                result.append(text[pos:start])
+                pos = start + len("<think>")
+                in_think = True
+        return "".join(result), in_think
+
     async def generate_stream(
         self,
         messages: list[dict],
@@ -56,6 +83,7 @@ class LocalLLM:
         stream = await self.client.chat.completions.create(**kwargs)
 
         buffer = ""
+        in_think = False
         # tool_calls断片を組み立てるためのバッファ
         tool_calls_buf: dict[int, dict] = {}
 
@@ -65,16 +93,21 @@ class LocalLLM:
 
             # テキスト応答の処理
             if delta.content:
-                buffer += delta.content
+                clean, in_think = self._strip_think_tags(
+                    delta.content, in_think
+                )
+                if clean:
+                    buffer += clean
 
-                parts = self._sentence_pattern.split(buffer)
-                for sentence in parts[:-1]:
-                    sentence = sentence.strip()
-                    if sentence:
-                        logger.debug(f"LLMチャンク: '{sentence}'")
-                        yield TextChunk(text=sentence)
+                if buffer and not in_think:
+                    parts = self._sentence_pattern.split(buffer)
+                    for sentence in parts[:-1]:
+                        sentence = sentence.strip()
+                        if sentence:
+                            logger.debug(f"LLMチャンク: '{sentence}'")
+                            yield TextChunk(text=sentence)
 
-                buffer = parts[-1]
+                    buffer = parts[-1]
 
             # tool_calls断片の組み立て
             if delta.tool_calls:

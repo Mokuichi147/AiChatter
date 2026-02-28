@@ -51,6 +51,7 @@ class AudioPipeline:
         self._pipeline_lock = asyncio.Lock()
         self._device_sleeping: bool = False
         self._sleep_after_tts: bool = False
+        self._ws_closed: bool = False
 
     @staticmethod
     def _history_path() -> Path:
@@ -127,6 +128,15 @@ class AudioPipeline:
 
         self._audio_buffer.clear()
 
+    async def _safe_send(self, data: bytes) -> bool:
+        """WebSocketへ安全に送信する。失敗時はFalseを返す。"""
+        try:
+            await self.send_fn(data)
+            return True
+        except Exception:
+            self._ws_closed = True
+            return False
+
     async def _synthesize_and_send(self, sentence: str) -> None:
         """テキストをTTS合成してWebSocketで送信する。"""
         loop = asyncio.get_event_loop()
@@ -135,13 +145,14 @@ class AudioPipeline:
             lambda s=sentence: list(self.tts.synthesize_chunks(s)),
         )
         for chunk in chunks:
-            if self._interrupted:
+            if self._interrupted or self._ws_closed:
                 break
             offset = 0
             while offset < len(chunk):
                 part = chunk[offset : offset + MAX_CHUNK]
                 header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(part))
-                await self.send_fn(header + part)
+                if not await self._safe_send(header + part):
+                    return
                 offset += MAX_CHUNK
 
     def _build_system_prompt(self, extra_instruction: str = "") -> str:
@@ -172,7 +183,9 @@ class AudioPipeline:
                 "- delete_memory: 不要な記憶を削除します。"
                 "先にsearch_memoryでキーを確認してください。\n"
                 "- set_volume: 音量調整を頼まれたときに使います。\n"
-                "- set_notification: ユーザーが通知やリマインダーを頼んだときに使います。\n"
+                "- set_notification: ユーザーが通知やリマインダーを頼んだときに使います。"
+                "定期通知はrepeatで指定: 'every:30m'(30分毎), 'every:2h'(2時間毎), "
+                "'cron:08:00'(毎日8時), 'cron:07:30:weekdays'(平日), 'cron:09:00:mon,fri'(曜日指定)。\n"
                 "- list_notifications: 予約済みの通知一覧を確認します。\n"
                 "- delete_notification: 通知をキャンセルしたいときに使います。"
                 "先にlist_notificationsでIDを確認してください。\n"
@@ -205,8 +218,8 @@ class AudioPipeline:
             tool_call_requests: list[ToolCallRequest] = []
 
             async for event in self.llm.generate_stream(messages, tools):
-                if self._interrupted:
-                    logger.info("割り込みによりパイプライン中断")
+                if self._interrupted or self._ws_closed:
+                    logger.info("割り込みまたは接続断によりパイプライン中断")
                     break
 
                 if isinstance(event, TextChunk):
@@ -216,7 +229,7 @@ class AudioPipeline:
                 elif isinstance(event, ToolCallRequest):
                     tool_call_requests.append(event)
 
-            if self._interrupted:
+            if self._interrupted or self._ws_closed:
                 break
 
             # ツール呼び出しがなければ終了
@@ -253,10 +266,10 @@ class AudioPipeline:
             # 次のラウンドへ（LLM再呼び出し）
             full_response = ""
 
-        if not self._interrupted:
+        if not self._interrupted and not self._ws_closed:
             # TTS終了通知
             header = make_header(MSG_TTS_END, self._next_seq(), 0)
-            await self.send_fn(header)
+            await self._safe_send(header)
             logger.info("TTS完了送信")
 
             # スリープ予約がある場合、TTS完了後に送信
@@ -265,15 +278,20 @@ class AudioPipeline:
                 await self._send_sleep_now()
 
             # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
-            self._history.append({"role": "user", "content": user_text})
-            self._history.append(
-                {"role": "assistant", "content": full_response}
-            )
-            if len(self._history) > 20:
-                self._history = self._history[-20:]
-            self._save_history()
+            if full_response:
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._history.append(
+                    {"role": "user", "content": user_text, "created_at": now_str}
+                )
+                self._history.append(
+                    {"role": "assistant", "content": full_response, "created_at": now_str}
+                )
+                if len(self._history) > 20:
+                    self._history = self._history[-20:]
+                self._save_history()
 
     async def _run_pipeline(self, audio_data: bytes) -> None:
+        tts_end_sent = False
         try:
             # --- ASR ---
             loop = asyncio.get_event_loop()
@@ -282,7 +300,8 @@ class AudioPipeline:
             if not text:
                 logger.info("ASR: 空の認識結果、TTS_END送信")
                 header = make_header(MSG_TTS_END, self._next_seq(), 0)
-                await self.send_fn(header)
+                await self._safe_send(header)
+                tts_end_sent = True
                 return
 
             logger.info(f"ASR認識: '{text}'")
@@ -291,16 +310,26 @@ class AudioPipeline:
                 # --- メッセージ組み立て ---
                 system_prompt = self._build_system_prompt()
                 messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(self._history)
+                messages.extend(
+                    {"role": h["role"], "content": h["content"]}
+                    for h in self._history
+                )
                 messages.append({"role": "user", "content": text})
 
                 await self._process_llm_and_tts(messages, text)
+                tts_end_sent = True
 
         except asyncio.CancelledError:
             logger.info("パイプラインタスクキャンセル")
             raise
         except Exception as e:
             logger.error(f"パイプラインエラー: {e}", exc_info=True)
+        finally:
+            # エラー時もTTS_ENDを送信してESP32がPROCESSINGで停止するのを防ぐ
+            if not tts_end_sent and not self._ws_closed:
+                header = make_header(MSG_TTS_END, self._next_seq(), 0)
+                await self._safe_send(header)
+                logger.info("TTS_END送信 (エラーリカバリ)")
 
     async def send_sleep(self) -> None:
         """TTS完了後にデバイスをスリープさせるフラグを立てる。"""
@@ -310,17 +339,17 @@ class AudioPipeline:
     async def _send_sleep_now(self) -> None:
         """MSG_SLEEPを即座に送信する。"""
         header = make_header(MSG_SLEEP, self._next_seq(), 0)
-        await self.send_fn(header)
-        self._device_sleeping = True
-        self._sleep_after_tts = False
-        logger.info("MSG_SLEEP送信")
+        if await self._safe_send(header):
+            self._device_sleeping = True
+            self._sleep_after_tts = False
+            logger.info("MSG_SLEEP送信")
 
     async def send_wake(self) -> None:
         """デバイスにウェイク指示を送信する。"""
         header = make_header(MSG_WAKE, self._next_seq(), 0)
-        await self.send_fn(header)
-        self._device_sleeping = False
-        logger.info("MSG_WAKE送信")
+        if await self._safe_send(header):
+            self._device_sleeping = False
+            logger.info("MSG_WAKE送信")
 
     async def process_button_press(self) -> None:
         """ボタン押下をLLMに伝えて応答を生成する。"""
@@ -330,6 +359,7 @@ class AudioPipeline:
 
     async def generate_from_text(self, text: str) -> None:
         """ASRをスキップし、指定テキストを直接LLM→TTS処理する（通知用）。"""
+        tts_end_sent = False
         try:
             # スリープ中なら先にウェイクして安定待ち
             if self._device_sleeping:
@@ -340,14 +370,23 @@ class AudioPipeline:
                 instruction = f"[通知] {text} — この内容をユーザーにキャラクターらしく伝えてください。"
                 system_prompt = self._build_system_prompt()
                 messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(self._history)
+                messages.extend(
+                    {"role": h["role"], "content": h["content"]}
+                    for h in self._history
+                )
                 messages.append({"role": "user", "content": instruction})
 
                 self._interrupted = False
                 await self._process_llm_and_tts(messages, instruction)
+                tts_end_sent = True
 
         except asyncio.CancelledError:
             logger.info("通知タスクキャンセル")
             raise
         except Exception as e:
             logger.error(f"通知パイプラインエラー: {e}", exc_info=True)
+        finally:
+            if not tts_end_sent and not self._ws_closed:
+                header = make_header(MSG_TTS_END, self._next_seq(), 0)
+                await self._safe_send(header)
+                logger.info("TTS_END送信 (通知エラーリカバリ)")

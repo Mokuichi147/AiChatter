@@ -1,7 +1,8 @@
 import json
 import logging
+import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 
@@ -42,7 +43,7 @@ class NotificationStore:
         except OSError as e:
             logger.warning(f"通知の保存失敗: {e}")
 
-    def add(self, dt: datetime, message: str) -> str:
+    def add(self, dt: datetime, message: str, repeat: str | None = None) -> str:
         """通知を追加し、一意IDを返す。"""
         notification_id = uuid.uuid4().hex[:8]
         entry = {
@@ -50,10 +51,12 @@ class NotificationStore:
             "datetime": dt.strftime("%Y-%m-%d %H:%M"),
             "message": message,
         }
+        if repeat:
+            entry["repeat"] = repeat
         with self._lock:
             self._notifications.append(entry)
             self._save()
-        logger.info(f"通知を追加: id={notification_id} dt={entry['datetime']} msg={message}")
+        logger.info(f"通知を追加: id={notification_id} dt={entry['datetime']} msg={message} repeat={repeat}")
         return notification_id
 
     def list_all(self) -> list[dict]:
@@ -75,7 +78,7 @@ class NotificationStore:
         return False
 
     def pop_due(self) -> list[dict]:
-        """現在時刻を過ぎた通知を取り出して削除する。"""
+        """現在時刻を過ぎた通知を取り出す。repeat付きは次回日時に更新して残す。"""
         now = datetime.now()
         due = []
         remaining = []
@@ -87,6 +90,13 @@ class NotificationStore:
                     continue
                 if ndt <= now:
                     due.append(n)
+                    repeat = n.get("repeat")
+                    if repeat:
+                        next_dt = self._calc_next(now, repeat)
+                        if next_dt:
+                            updated = dict(n)
+                            updated["datetime"] = next_dt.strftime("%Y-%m-%d %H:%M")
+                            remaining.append(updated)
                 else:
                     remaining.append(n)
             if due:
@@ -94,12 +104,73 @@ class NotificationStore:
                 self._save()
         return due
 
+    @staticmethod
+    def _calc_next(now: datetime, repeat: str) -> datetime | None:
+        """repeat文字列から次回発火日時を計算する。"""
+        if repeat.startswith("every:"):
+            return NotificationStore._calc_next_interval(now, repeat[6:])
+        if repeat.startswith("cron:"):
+            return NotificationStore._calc_next_cron(now, repeat[5:])
+        return None
+
+    @staticmethod
+    def _calc_next_interval(now: datetime, interval_str: str) -> datetime | None:
+        """'30m', '2h', '1d' 形式からnowに加算した次回日時を返す。"""
+        m = re.fullmatch(r"(\d+)([mhd])", interval_str)
+        if not m:
+            return None
+        value, unit = int(m.group(1)), m.group(2)
+        if unit == "m":
+            return now + timedelta(minutes=value)
+        if unit == "h":
+            return now + timedelta(hours=value)
+        if unit == "d":
+            return now + timedelta(days=value)
+        return None
+
+    @staticmethod
+    def _calc_next_cron(now: datetime, cron_str: str) -> datetime | None:
+        """'HH:MM' or 'HH:MM:days' 形式から次回日時を返す。"""
+        parts = cron_str.split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+        day_filter = parts[2] if len(parts) >= 3 else None
+        allowed_days: set[int] | None = None
+        if day_filter:
+            day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+            if day_filter == "weekdays":
+                allowed_days = {0, 1, 2, 3, 4}
+            elif day_filter == "weekends":
+                allowed_days = {5, 6}
+            else:
+                allowed_days = set()
+                for d in day_filter.split(","):
+                    d = d.strip().lower()
+                    if d in day_map:
+                        allowed_days.add(day_map[d])
+                if not allowed_days:
+                    return None
+
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        for _ in range(8):
+            if allowed_days is None or candidate.weekday() in allowed_days:
+                return candidate
+            candidate += timedelta(days=1)
+        return None
+
 
 class SetNotificationTool(ToolBase):
     name = "set_notification"
     description = (
         "指定した日時にユーザーへ通知を予約します。"
         "日時は 'YYYY-MM-DD HH:MM' 形式で指定してください。"
+        "repeatを指定すると定期通知になります。"
     )
     input_schema = {
         "type": "object",
@@ -112,6 +183,14 @@ class SetNotificationTool(ToolBase):
                 "type": "string",
                 "description": "通知内容",
             },
+            "repeat": {
+                "type": "string",
+                "description": (
+                    "定期実行パターン (省略時は1回限り)。"
+                    "interval: 'every:30m', 'every:2h', 'every:1d'。"
+                    "cron: 'cron:08:00'(毎日), 'cron:07:30:weekdays'(平日), 'cron:09:00:mon,fri'(指定曜日)。"
+                ),
+            },
         },
         "required": ["datetime", "message"],
     }
@@ -122,6 +201,7 @@ class SetNotificationTool(ToolBase):
     async def execute(self, **kwargs) -> ToolResult:
         dt_str = kwargs.get("datetime", "")
         message = kwargs.get("message", "")
+        repeat = kwargs.get("repeat")
 
         if not dt_str or not message:
             return ToolResult(content="datetime と message は必須です。", is_error=True)
@@ -140,10 +220,31 @@ class SetNotificationTool(ToolBase):
                 is_error=True,
             )
 
-        notification_id = self._store.add(dt, message)
-        return ToolResult(
-            content=f"通知を予約しました。ID: {notification_id}, 日時: {dt_str}, 内容: {message}"
-        )
+        if repeat:
+            if not (repeat.startswith("every:") or repeat.startswith("cron:")):
+                return ToolResult(
+                    content=f"repeat形式が不正です: '{repeat}'。'every:30m' や 'cron:08:00' 形式で指定してください。",
+                    is_error=True,
+                )
+            test_now = datetime.now()
+            if repeat.startswith("every:"):
+                if NotificationStore._calc_next_interval(test_now, repeat[6:]) is None:
+                    return ToolResult(
+                        content=f"repeatのinterval形式が不正です: '{repeat}'。'every:30m', 'every:2h', 'every:1d' 等を指定してください。",
+                        is_error=True,
+                    )
+            elif repeat.startswith("cron:"):
+                if NotificationStore._calc_next_cron(test_now, repeat[5:]) is None:
+                    return ToolResult(
+                        content=f"repeatのcron形式が不正です: '{repeat}'。'cron:08:00', 'cron:07:30:weekdays' 等を指定してください。",
+                        is_error=True,
+                    )
+
+        notification_id = self._store.add(dt, message, repeat)
+        result_msg = f"通知を予約しました。ID: {notification_id}, 日時: {dt_str}, 内容: {message}"
+        if repeat:
+            result_msg += f", 繰り返し: {repeat}"
+        return ToolResult(content=result_msg)
 
 
 class ListNotificationsTool(ToolBase):
@@ -163,7 +264,10 @@ class ListNotificationsTool(ToolBase):
             return ToolResult(content="予約されている通知はありません。")
         lines = []
         for n in notifications:
-            lines.append(f"- ID: {n['id']}, 日時: {n['datetime']}, 内容: {n['message']}")
+            line = f"- ID: {n['id']}, 日時: {n['datetime']}, 内容: {n['message']}"
+            if n.get("repeat"):
+                line += f", 繰り返し: {n['repeat']}"
+            lines.append(line)
         return ToolResult(content=f"通知一覧 ({len(notifications)}件):\n" + "\n".join(lines))
 
 
