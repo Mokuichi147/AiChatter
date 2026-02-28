@@ -141,21 +141,27 @@ class AudioPipeline:
 
     async def _synthesize_and_send(self, sentence: str) -> None:
         """テキストをTTS合成してWebSocketで送信する。"""
+        # 改行が含まれる場合は行単位で分割して順に合成する
+        segments = [sentence]
+        if "\n" in sentence or "\r" in sentence:
+            segments = [seg.strip() for seg in sentence.splitlines() if seg.strip()]
+
         loop = asyncio.get_event_loop()
-        chunks = await loop.run_in_executor(
-            None,
-            lambda s=sentence: list(self.tts.synthesize_chunks(s)),
-        )
-        for chunk in chunks:
-            if self._interrupted or self._ws_closed:
-                break
-            offset = 0
-            while offset < len(chunk):
-                part = chunk[offset : offset + MAX_CHUNK]
-                header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(part))
-                if not await self._safe_send(header + part):
-                    return
-                offset += MAX_CHUNK
+        for segment in segments:
+            chunks = await loop.run_in_executor(
+                None,
+                lambda s=segment: list(self.tts.synthesize_chunks(s)),
+            )
+            for chunk in chunks:
+                if self._interrupted or self._ws_closed:
+                    break
+                offset = 0
+                while offset < len(chunk):
+                    part = chunk[offset : offset + MAX_CHUNK]
+                    header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(part))
+                    if not await self._safe_send(header + part):
+                        return
+                    offset += MAX_CHUNK
 
     def _build_system_prompt(self, extra_instruction: str = "") -> str:
         """システムプロンプトを組み立てる。"""
