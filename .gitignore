@@ -15,6 +15,9 @@ server/**/__pycache__/
 # TTS/ASRモデル
 server/models/
 
+# 生成済み参照音声キャッシュ
+server/voices/
+
 # 環境設定
 .env
 *.env.local
