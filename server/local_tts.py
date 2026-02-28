@@ -11,7 +11,7 @@ from config import character
 logger = logging.getLogger(__name__)
 
 TARGET_SAMPLE_RATE = 16000  # ESP32側の受信サンプルレート
-VOLUME_SCALE = 2048  # 音量スケール (6.25%)
+DEFAULT_VOLUME_SCALE = 2048  # 音量スケール (6.25%)
 VOICES_DIR = Path(__file__).parent / "voices"
 
 # TTS合成可能な文字のみ残す (日本語・英数字・句読点・記号)
@@ -27,6 +27,7 @@ class LocalTTS:
         from scipy import signal as _signal
 
         self._resample = _signal.resample_poly
+        self.volume_scale: int = DEFAULT_VOLUME_SCALE
 
         voice_config = character.voice
         self.voice_config = voice_config
@@ -152,7 +153,7 @@ class LocalTTS:
             if peak > 0:
                 audio_np = audio_np / peak
 
-            pcm = (audio_np * VOLUME_SCALE).astype(np.int16).tobytes()
+            pcm = (audio_np * self.volume_scale).astype(np.int16).tobytes()
 
             if not pcm:
                 return

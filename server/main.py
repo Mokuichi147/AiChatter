@@ -33,6 +33,7 @@ app = FastAPI(title="AiChatter Server")
 _asr = None
 _llm = None
 _tts = None
+_tool_registry = None
 
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
@@ -41,7 +42,7 @@ def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts
+    global _asr, _llm, _tts, _tool_registry
     if not ECHO_MODE:
         logger.info("AIモデルをプリロード中...")
         from local_asr import LocalASR
@@ -51,6 +52,25 @@ async def startup_event() -> None:
         _llm = LocalLLM()
         _tts = LocalTTS()
         logger.info("AIモデルプリロード完了")
+
+        # ツールレジストリ初期化
+        if settings.tools_enabled:
+            from tools import ToolRegistry
+            from tools.conversation_memory import (
+                MemoryStore,
+                SaveMemoryTool,
+                SearchMemoryTool,
+            )
+            from tools.voice_control import SetVolumeTool
+            from tools.search import SearchTool
+
+            _tool_registry = ToolRegistry()
+            memory_store = MemoryStore(settings.memory_file)
+            _tool_registry.register(SaveMemoryTool(memory_store))
+            _tool_registry.register(SearchMemoryTool(memory_store))
+            _tool_registry.register(SetVolumeTool(_tts))
+            _tool_registry.register(SearchTool())
+            logger.info("ツールレジストリ初期化完了")
 
 
 @app.get("/health")
@@ -72,7 +92,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             async def send_fn(data: bytes) -> None:
                 await websocket.send_bytes(data)
 
-            pipeline = AudioPipeline(send_fn, _asr, _llm, _tts)
+            pipeline = AudioPipeline(send_fn, _asr, _llm, _tts, _tool_registry)
             logger.info("AIパイプラインモード")
         except Exception as e:
             logger.warning(f"AIパイプライン初期化失敗 (エコーモードにフォールバック): {e}")

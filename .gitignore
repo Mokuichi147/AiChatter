@@ -18,6 +18,9 @@ server/models/
 # 生成済み参照音声キャッシュ
 server/voices/
 
+# ツール永続データ
+server/data/
+
 # 環境設定
 .env
 *.env.local

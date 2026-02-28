@@ -87,9 +87,10 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # LLM (Ollama)
+    # LLM (OpenAI互換API)
     llm_model: str = "glm-5:cloud"
-    ollama_base_url: str = "http://localhost:11434/v1"
+    llm_base_url: str = "http://localhost:11434/v1"
+    llm_api_key: str = "ollama"
 
     # ASR (mlx-audio Qwen3-ASR)
     asr_model: str = "mlx-community/Qwen3-ASR-0.6B-8bit"
@@ -101,6 +102,10 @@ class Settings(BaseSettings):
 
     # キャラクター設定ファイル
     character_file: str = "character.yaml"
+
+    # ツール設定
+    tools_enabled: bool = True
+    memory_file: str = "data/memory.json"
 
     # サーバー設定
     host: str = "0.0.0.0"

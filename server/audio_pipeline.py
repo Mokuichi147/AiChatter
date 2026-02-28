@@ -1,11 +1,13 @@
 import asyncio
+import json
 import logging
 import struct
 from typing import Awaitable, Callable, Optional
 
 from local_asr import LocalASR
-from local_llm import LocalLLM
+from local_llm import LocalLLM, TextChunk, ToolCallRequest
 from local_tts import LocalTTS
+from config import character, settings
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,8 @@ MSG_TTS_CHUNK = 0x02
 MSG_TTS_END = 0x03
 
 HEADER_SIZE = 7  # [type:1][seq:2][payload_len:4]
+MAX_TOOL_ROUNDS = 5
+MAX_CHUNK = 4096
 
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
@@ -27,11 +31,13 @@ class AudioPipeline:
         asr: LocalASR,
         llm: LocalLLM,
         tts: LocalTTS,
+        tool_registry=None,
     ) -> None:
         self.send_fn = send_fn
         self.asr = asr
         self.llm = llm
         self.tts = tts
+        self.tool_registry = tool_registry
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
@@ -78,6 +84,23 @@ class AudioPipeline:
 
         self._audio_buffer.clear()
 
+    async def _synthesize_and_send(self, sentence: str) -> None:
+        """テキストをTTS合成してWebSocketで送信する。"""
+        loop = asyncio.get_event_loop()
+        chunks = await loop.run_in_executor(
+            None,
+            lambda s=sentence: list(self.tts.synthesize_chunks(s)),
+        )
+        for chunk in chunks:
+            if self._interrupted:
+                break
+            offset = 0
+            while offset < len(chunk):
+                part = chunk[offset : offset + MAX_CHUNK]
+                header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(part))
+                await self.send_fn(header + part)
+                offset += MAX_CHUNK
+
     async def _run_pipeline(self, audio_data: bytes) -> None:
         try:
             # --- ASR ---
@@ -92,35 +115,93 @@ class AudioPipeline:
 
             logger.info(f"ASR認識: '{text}'")
 
-            # --- LLM + TTS ストリーミング ---
-            full_response = ""
+            # --- メッセージ組み立て ---
+            system_prompt = character.persona.system_prompt or settings.system_prompt
 
-            async for sentence in self.llm.generate_stream(text, self._history):
-                if self._interrupted:
-                    logger.info("割り込みによりパイプライン中断")
-                    break
-
-                full_response += sentence
-                logger.info(f"TTS合成: '{sentence}'")
-
-                # TTS一括生成してすぐに送信
-                chunks = await loop.run_in_executor(
-                    None,
-                    lambda s=sentence: list(self.tts.synthesize_chunks(s)),
+            # ツール有効時はメモリ活用の指示を追加
+            if (
+                self.tool_registry
+                and not self.tool_registry.is_empty
+                and settings.tools_enabled
+            ):
+                system_prompt += (
+                    "\n\n## ツール使用ガイド\n"
+                    "あなたは以下のツールを使えます。積極的に活用してください。\n"
+                    "- save_memory: ユーザーの好み・名前・重要な事実・約束事など、"
+                    "後で役立ちそうな情報は自主的にメモしてください。"
+                    "明示的に「覚えて」と言われなくても構いません。\n"
+                    "- search_memory: ユーザーの発言に関連する記憶がありそうなとき、"
+                    "まず検索して過去の情報を活用してください。\n"
+                    "- set_volume: 音量調整を頼まれたときに使います。\n"
                 )
 
-                for chunk in chunks:
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(self._history)
+            messages.append({"role": "user", "content": text})
+
+            # ツール設定
+            tools = None
+            if (
+                self.tool_registry
+                and not self.tool_registry.is_empty
+                and settings.tools_enabled
+            ):
+                tools = self.tool_registry.to_openai_tools()
+
+            # --- LLM + TTS ストリーミング (ツール実行ループ) ---
+            full_response = ""
+
+            for round_num in range(MAX_TOOL_ROUNDS):
+                tool_call_requests: list[ToolCallRequest] = []
+
+                async for event in self.llm.generate_stream(messages, tools):
                     if self._interrupted:
+                        logger.info("割り込みによりパイプライン中断")
                         break
-                    MAX_CHUNK = 4096
-                    offset = 0
-                    while offset < len(chunk):
-                        part = chunk[offset:offset + MAX_CHUNK]
-                        header = make_header(
-                            MSG_TTS_CHUNK, self._next_seq(), len(part)
-                        )
-                        await self.send_fn(header + part)
-                        offset += MAX_CHUNK
+
+                    if isinstance(event, TextChunk):
+                        full_response += event.text
+                        logger.info(f"TTS合成: '{event.text}'")
+                        await self._synthesize_and_send(event.text)
+                    elif isinstance(event, ToolCallRequest):
+                        tool_call_requests.append(event)
+
+                if self._interrupted:
+                    break
+
+                # ツール呼び出しがなければ終了
+                if not tool_call_requests:
+                    break
+
+                # assistantメッセージ（tool_calls付き）を追加
+                assistant_msg = {"role": "assistant", "content": full_response or None}
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        },
+                    }
+                    for tc in tool_call_requests
+                ]
+                messages.append(assistant_msg)
+
+                # ツール実行
+                for tc in tool_call_requests:
+                    logger.info(f"ツール実行: {tc.name}")
+                    result = await self.tool_registry.execute(tc.name, tc.arguments)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result.content,
+                        }
+                    )
+
+                # 次のラウンドへ（LLM再呼び出し）
+                full_response = ""
 
             if not self._interrupted:
                 # TTS終了通知
@@ -128,9 +209,11 @@ class AudioPipeline:
                 await self.send_fn(header)
                 logger.info("TTS完了送信")
 
-                # 会話履歴を更新（最大10往復 = 20メッセージ）
+                # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
                 self._history.append({"role": "user", "content": text})
-                self._history.append({"role": "assistant", "content": full_response})
+                self._history.append(
+                    {"role": "assistant", "content": full_response}
+                )
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
 
