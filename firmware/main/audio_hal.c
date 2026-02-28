@@ -43,6 +43,10 @@ static TaskHandle_t s_mic_task = NULL;
 #define VAD_SPEECH_FRAMES       3             /* 連続発話フレーム数で確定 */
 #define VAD_SILENCE_FRAMES      15            /* 連続無音フレーム数で確定 */
 
+/* マイクプリバッファ: VAD確定前の音声を保持して発話冒頭の欠落を防止
+ * VAD_SPEECH_FRAMES + 余裕2フレーム = 5フレーム分 (約160ms) */
+#define MIC_PREBUF_FRAMES       5
+
 /* リングバッファ */
 static RingbufHandle_t s_aec_ref_buf  = NULL;
 static RingbufHandle_t s_playback_buf = NULL;
@@ -305,6 +309,19 @@ static void mic_raw_task(void *arg) {
         return;
     }
 
+    /* プリバッファ: VAD確定前の音声フレームを保持するリングバッファ */
+    int16_t *prebuf = malloc(AUDIO_CHUNK_BYTES * MIC_PREBUF_FRAMES);
+    size_t prebuf_counts[MIC_PREBUF_FRAMES];  /* 各スロットのサンプル数 */
+    int prebuf_head = 0;   /* 次に書き込むスロット */
+    int prebuf_fill = 0;   /* 現在の充填スロット数 */
+    if (!prebuf) {
+        ESP_LOGE(TAG, "マイクプリバッファ確保失敗");
+        free(mic_buf);
+        vTaskDelete(NULL);
+        return;
+    }
+    memset(prebuf_counts, 0, sizeof(prebuf_counts));
+
     bool prev_speech = false;
     int speech_count = 0;
     int silence_count = 0;
@@ -347,13 +364,24 @@ static void mic_raw_task(void *arg) {
             speech_count = 0;
             silence_count = 0;
             prev_speech = false;
+            prebuf_fill = 0;  /* プリバッファもクリア */
         } else if (is_speech) {
             speech_count++;
             silence_count = 0;
             if (speech_count >= VAD_SPEECH_FRAMES && !prev_speech) {
                 prev_speech = true;
-                ESP_LOGI(TAG, "VAD: 発話開始検出");
+                ESP_LOGI(TAG, "VAD: 発話開始検出 (プリバッファ %dフレーム送信)", prebuf_fill);
                 if (s_vad_cb) s_vad_cb(true);
+
+                /* プリバッファの内容を送信 (発話冒頭を復元) */
+                if (s_rx_cb && prebuf_fill > 0) {
+                    int start = (prebuf_head - prebuf_fill + MIC_PREBUF_FRAMES) % MIC_PREBUF_FRAMES;
+                    for (int j = 0; j < prebuf_fill; j++) {
+                        int idx = (start + j) % MIC_PREBUF_FRAMES;
+                        s_rx_cb(prebuf + idx * AUDIO_CHUNK_SAMPLES, prebuf_counts[idx]);
+                    }
+                }
+                prebuf_fill = 0;
             }
         } else {
             silence_count++;
@@ -365,9 +393,22 @@ static void mic_raw_task(void *arg) {
             }
         }
 
-        /* クリーン音声コールバック (LISTENING/VAD_SILENCE中のみ送信) */
-        if (s_rx_cb && sample_count > 0 && !vad_suppressed) {
-            s_rx_cb(mic_buf, sample_count);
+        if (!vad_suppressed && sample_count > 0) {
+            if (prev_speech) {
+                /* 発話中: そのまま送信 */
+                if (s_rx_cb) {
+                    s_rx_cb(mic_buf, sample_count);
+                }
+            } else {
+                /* 発話前/無音: プリバッファに蓄積 */
+                memcpy(prebuf + prebuf_head * AUDIO_CHUNK_SAMPLES,
+                       mic_buf, sample_count * sizeof(int16_t));
+                prebuf_counts[prebuf_head] = sample_count;
+                prebuf_head = (prebuf_head + 1) % MIC_PREBUF_FRAMES;
+                if (prebuf_fill < MIC_PREBUF_FRAMES) {
+                    prebuf_fill++;
+                }
+            }
         }
     }
 }

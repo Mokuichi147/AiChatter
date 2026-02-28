@@ -108,13 +108,10 @@ static bool wifi_connect(void) {
 
 /**
  * AFEからのクリーン音声受信コールバック
- * LISTENING / VAD_SILENCE 状態のときのみサーバーへ送信
+ * audio_hal側でVAD抑制済みのため、呼ばれた音声はそのまま送信する
  */
 static void audio_rx_callback(const int16_t *samples, size_t count) {
-    sm_state_t state = state_machine_get_state();
-    if (state == SM_STATE_LISTENING || state == SM_STATE_VAD_SILENCE) {
-        ws_client_send_audio(samples, count);
-    }
+    ws_client_send_audio(samples, count);
 }
 
 /**
