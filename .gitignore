@@ -25,6 +25,9 @@ server/data/
 .env
 *.env.local
 
+# キャラクター設定（ユーザーカスタマイズ用）
+server/character.yaml
+
 # OS
 .DS_Store
 Thumbs.db
