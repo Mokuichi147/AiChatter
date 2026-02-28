@@ -153,9 +153,9 @@ static void tts_end_callback(void) {
  * ボタンAの長押し (1秒) でリセット/再接続
  * ============================================================ */
 static void button_task(void *arg) {
-    /* ボタンAは内蔵プルアップ付き、押下でLOW */
+    /* ボタンA(KEY1)・ボタンB(KEY2)を入力設定 */
     gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << BUTTON_A_GPIO),
+        .pin_bit_mask = (1ULL << BUTTON_A_GPIO) | (1ULL << BUTTON_B_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -163,31 +163,60 @@ static void button_task(void *arg) {
     };
     gpio_config(&btn_cfg);
 
-    bool was_pressed = false;
-    uint32_t press_start = 0;
+    /* KEY1 (ボタンA) 状態 */
+    bool key1_was_pressed = false;
+    uint32_t key1_press_start = 0;
+
+    /* KEY2 (ボタンB) 状態 */
+    bool key2_was_pressed = false;
 
     while (true) {
-        bool pressed = (gpio_get_level(BUTTON_A_GPIO) == 0);
+        /* --- KEY1 (G11): 短押し=ボタン通知、長押し=バージイン --- */
+        bool key1_pressed = (gpio_get_level(BUTTON_A_GPIO) == 0);
 
-        if (pressed && !was_pressed) {
-            press_start = xTaskGetTickCount();
-            was_pressed = true;
-            ESP_LOGD(TAG, "ボタンA 押下");
-        } else if (!pressed && was_pressed) {
-            was_pressed = false;
+        if (key1_pressed && !key1_was_pressed) {
+            key1_press_start = xTaskGetTickCount();
+            key1_was_pressed = true;
+            ESP_LOGD(TAG, "KEY1 押下");
+        } else if (!key1_pressed && key1_was_pressed) {
+            key1_was_pressed = false;
             uint32_t duration_ms =
-                (xTaskGetTickCount() - press_start) * portTICK_PERIOD_MS;
-            ESP_LOGD(TAG, "ボタンA 離した (%ldms)", (long)duration_ms);
+                (xTaskGetTickCount() - key1_press_start) * portTICK_PERIOD_MS;
+            ESP_LOGD(TAG, "KEY1 離した (%ldms)", (long)duration_ms);
 
-            /* 1秒長押し: バージイン強制 (デバッグ用) */
-            if (duration_ms > 1000) {
-                ESP_LOGI(TAG, "長押し: 強制割り込み");
+            if (duration_ms >= 1000) {
+                /* 長押し: バージイン強制 */
+                ESP_LOGI(TAG, "KEY1長押し: 強制割り込み");
                 sm_state_t state = state_machine_get_state();
                 if (state == SM_STATE_SPEAKING) {
                     audio_hal_stop_playback();
                     ws_client_send_interrupt();
                     state_machine_post_event(SM_EVENT_VAD_START, NULL, 0);
                 }
+            } else {
+                /* 短押し: サーバーにボタン通知 */
+                ESP_LOGI(TAG, "KEY1短押し: ボタン通知送信");
+                ws_client_send_button();
+            }
+        }
+
+        /* --- KEY2 (G12): スリープ/ウェイクトグル --- */
+        bool key2_pressed = (gpio_get_level(BUTTON_B_GPIO) == 0);
+
+        if (key2_pressed && !key2_was_pressed) {
+            key2_was_pressed = true;
+            ESP_LOGD(TAG, "KEY2 押下");
+        } else if (!key2_pressed && key2_was_pressed) {
+            key2_was_pressed = false;
+            ESP_LOGD(TAG, "KEY2 離した");
+
+            sm_state_t state = state_machine_get_state();
+            if (state == SM_STATE_SLEEP) {
+                ESP_LOGI(TAG, "KEY2: ウェイク");
+                state_machine_post_event(SM_EVENT_WAKE, NULL, 0);
+            } else {
+                ESP_LOGI(TAG, "KEY2: スリープ");
+                state_machine_post_event(SM_EVENT_SLEEP, NULL, 0);
             }
         }
 

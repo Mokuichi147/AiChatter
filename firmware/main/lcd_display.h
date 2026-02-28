@@ -10,6 +10,7 @@ typedef enum {
     LCD_STATE_LISTENING  = 1,  /**< 録音中 (青) */
     LCD_STATE_PROCESSING = 2,  /**< AI処理中 (黄) */
     LCD_STATE_SPEAKING   = 3,  /**< 音声再生中 (緑) */
+    LCD_STATE_SLEEP      = 4,  /**< スリープ中 (バックライト消灯) */
 } lcd_state_t;
 
 /**
@@ -28,3 +29,13 @@ void lcd_set_state(lcd_state_t state);
  * @param fmt printf形式フォーマット文字列
  */
 void lcd_log(const char *fmt, ...);
+
+/**
+ * @brief バックライト消灯 (スリープ時)
+ */
+void lcd_sleep(void);
+
+/**
+ * @brief バックライト復帰 (ウェイク時)
+ */
+void lcd_wake(void);

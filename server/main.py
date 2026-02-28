@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MSG_AUDIO_CHUNK = 0x01
 MSG_EOS = 0x11
 MSG_INTERRUPT = 0x12
+MSG_BUTTON = 0x13
 
 # WebSocketメッセージタイプ (Server → ESP32)
 MSG_TTS_CHUNK = 0x02
@@ -94,6 +95,7 @@ async def startup_event() -> None:
                 ListNotificationsTool,
                 DeleteNotificationTool,
             )
+            from tools.sleep_control import SetSleepTool
 
             _tool_registry = ToolRegistry()
             memory_store = MemoryStore(settings.memory_file)
@@ -107,6 +109,7 @@ async def startup_event() -> None:
             _tool_registry.register(SetNotificationTool(_notification_store))
             _tool_registry.register(ListNotificationsTool(_notification_store))
             _tool_registry.register(DeleteNotificationTool(_notification_store))
+            _tool_registry.register(SetSleepTool(lambda: _active_pipelines))
             logger.info("ツールレジストリ初期化完了")
 
         # 通知スケジューラー起動
@@ -165,6 +168,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 elif msg_type == MSG_INTERRUPT:
                     logger.info(f"バージイン受信 (seq={seq})")
                     await pipeline.process_interrupt()
+                elif msg_type == MSG_BUTTON:
+                    logger.info(f"ボタン押下受信 (seq={seq})")
+                    asyncio.create_task(pipeline.process_button_press())
             else:
                 # エコーモード
                 if msg_type == MSG_AUDIO_CHUNK:

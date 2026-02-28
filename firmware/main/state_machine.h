@@ -12,6 +12,7 @@ typedef enum {
     SM_STATE_VAD_SILENCE = 2, /**< 無音検出後タイムアウト待機中 */
     SM_STATE_PROCESSING  = 3, /**< AIパイプライン処理中 */
     SM_STATE_SPEAKING    = 4, /**< TTS音声再生中 */
+    SM_STATE_SLEEP       = 5, /**< スリープ中 (マイク停止・LCD消灯) */
 } sm_state_t;
 
 /**
@@ -24,6 +25,8 @@ typedef enum {
     SM_EVENT_WS_TTS_CHUNK,        /**< サーバーからTTS音声受信 */
     SM_EVENT_WS_TTS_END,          /**< サーバーからTTS終了受信 */
     SM_EVENT_PLAYBACK_DONE,       /**< 再生バッファ空 (再生完了) */
+    SM_EVENT_SLEEP,               /**< スリープ要求 */
+    SM_EVENT_WAKE,                /**< ウェイク要求 */
 } sm_event_t;
 
 /**

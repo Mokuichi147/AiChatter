@@ -405,6 +405,10 @@ void lcd_set_state(lcd_state_t state) {
             color = COLOR_GREEN;
             name = "SPEAKING";
             break;
+        case LCD_STATE_SLEEP:
+            color = COLOR_BLACK;
+            name = "SLEEP";
+            break;
         default:
             color = COLOR_GRAY;
             name = "UNKNOWN";
@@ -439,4 +443,16 @@ void lcd_log(const char *fmt, ...) {
         lcd_redraw_log();
         xSemaphoreGive(s_lcd_mutex);
     }
+}
+
+void lcd_sleep(void) {
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    ESP_LOGI(TAG, "バックライト消灯");
+}
+
+void lcd_wake(void) {
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 200);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    ESP_LOGI(TAG, "バックライト復帰");
 }

@@ -8,6 +8,7 @@
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "state_machine.h"
 
 #define TAG "WS_CLIENT"
 #define HEADER_SIZE 7  // [type:1][seq_hi:1][seq_lo:1][len:4]
@@ -85,6 +86,20 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
                         /* TTS終了 (ペイロードなし) */
                         audio_hal_notify_tts_end();
                         if (s_end_cb) s_end_cb();
+                        break;
+                    }
+
+                    if (msg_type == 0x04) {
+                        /* スリープ指示 */
+                        ESP_LOGI(TAG, "MSG_SLEEP受信");
+                        state_machine_post_event(SM_EVENT_SLEEP, NULL, 0);
+                        break;
+                    }
+
+                    if (msg_type == 0x05) {
+                        /* ウェイク指示 */
+                        ESP_LOGI(TAG, "MSG_WAKE受信");
+                        state_machine_post_event(SM_EVENT_WAKE, NULL, 0);
                         break;
                     }
 
@@ -190,6 +205,18 @@ void ws_client_send_end_of_speech(void) {
     esp_websocket_client_send_bin(s_client, (const char *)buf, HEADER_SIZE,
                                   pdMS_TO_TICKS(1000));
     ESP_LOGI(TAG, "EOS送信 (seq=%u)", s_seq);
+}
+
+void ws_client_send_button(void) {
+    if (!s_client || !esp_websocket_client_is_connected(s_client)) {
+        return;
+    }
+
+    uint8_t buf[HEADER_SIZE];
+    make_header(buf, 0x13, ++s_seq, 0);
+    esp_websocket_client_send_bin(s_client, (const char *)buf, HEADER_SIZE,
+                                  pdMS_TO_TICKS(1000));
+    ESP_LOGI(TAG, "ボタン押下通知送信 (seq=%u)", s_seq);
 }
 
 void ws_client_send_interrupt(void) {

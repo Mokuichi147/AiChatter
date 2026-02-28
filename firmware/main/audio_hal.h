@@ -61,3 +61,13 @@ void audio_hal_notify_tts_end(void);
  * @return true=バッファが空 (再生完了), false=再生中
  */
 bool audio_hal_playback_done(void);
+
+/**
+ * @brief スリープモード: マイクタスク停止 + AW8737(アンプ)OFF
+ */
+void audio_hal_sleep(void);
+
+/**
+ * @brief ウェイク: AW8737(アンプ)ON + マイクタスク再開
+ */
+void audio_hal_wake(void);

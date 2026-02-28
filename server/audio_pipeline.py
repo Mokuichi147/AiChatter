@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # WebSocketメッセージタイプ (Server → ESP32)
 MSG_TTS_CHUNK = 0x02
 MSG_TTS_END = 0x03
+MSG_SLEEP = 0x04
+MSG_WAKE = 0x05
 
 HEADER_SIZE = 7  # [type:1][seq:2][payload_len:4]
 MAX_TOOL_ROUNDS = 5
@@ -47,6 +49,8 @@ class AudioPipeline:
         self._interrupted: bool = False
         self._current_task: Optional[asyncio.Task] = None
         self._pipeline_lock = asyncio.Lock()
+        self._device_sleeping: bool = False
+        self._sleep_after_tts: bool = False
 
     @staticmethod
     def _history_path() -> Path:
@@ -172,6 +176,8 @@ class AudioPipeline:
                 "- list_notifications: 予約済みの通知一覧を確認します。\n"
                 "- delete_notification: 通知をキャンセルしたいときに使います。"
                 "先にlist_notificationsでIDを確認してください。\n"
+                "- set_sleep: デバイスをスリープさせます。「おやすみ」等の"
+                "就寝の挨拶を受けたら積極的に使ってください。\n"
             )
 
         if extra_instruction:
@@ -253,6 +259,11 @@ class AudioPipeline:
             await self.send_fn(header)
             logger.info("TTS完了送信")
 
+            # スリープ予約がある場合、TTS完了後に送信
+            if self._sleep_after_tts:
+                await asyncio.sleep(0.3)  # 再生完了まで少し待つ
+                await self._send_sleep_now()
+
             # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
             self._history.append({"role": "user", "content": user_text})
             self._history.append(
@@ -291,9 +302,40 @@ class AudioPipeline:
         except Exception as e:
             logger.error(f"パイプラインエラー: {e}", exc_info=True)
 
+    async def send_sleep(self) -> None:
+        """TTS完了後にデバイスをスリープさせるフラグを立てる。"""
+        self._sleep_after_tts = True
+        logger.info("スリープ予約 (TTS完了後に送信)")
+
+    async def _send_sleep_now(self) -> None:
+        """MSG_SLEEPを即座に送信する。"""
+        header = make_header(MSG_SLEEP, self._next_seq(), 0)
+        await self.send_fn(header)
+        self._device_sleeping = True
+        self._sleep_after_tts = False
+        logger.info("MSG_SLEEP送信")
+
+    async def send_wake(self) -> None:
+        """デバイスにウェイク指示を送信する。"""
+        header = make_header(MSG_WAKE, self._next_seq(), 0)
+        await self.send_fn(header)
+        self._device_sleeping = False
+        logger.info("MSG_WAKE送信")
+
+    async def process_button_press(self) -> None:
+        """ボタン押下をLLMに伝えて応答を生成する。"""
+        await self.generate_from_text(
+            "[ボタン押下] ユーザーがボタンを押しました。反応してください。"
+        )
+
     async def generate_from_text(self, text: str) -> None:
         """ASRをスキップし、指定テキストを直接LLM→TTS処理する（通知用）。"""
         try:
+            # スリープ中なら先にウェイクして安定待ち
+            if self._device_sleeping:
+                await self.send_wake()
+                await asyncio.sleep(0.5)
+
             async with self._pipeline_lock:
                 instruction = f"[通知] {text} — この内容をユーザーにキャラクターらしく伝えてください。"
                 system_prompt = self._build_system_prompt()

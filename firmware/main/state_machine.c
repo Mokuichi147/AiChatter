@@ -32,7 +32,7 @@ static volatile sm_state_t s_state   = SM_STATE_IDLE;
  * -------------------------------------------------------- */
 static void set_state(sm_state_t new_state) {
     const char *names[] = {"IDLE", "LISTENING", "VAD_SILENCE",
-                            "PROCESSING", "SPEAKING"};
+                            "PROCESSING", "SPEAKING", "SLEEP"};
     ESP_LOGI(TAG, "状態遷移: %s → %s",
              names[s_state], names[new_state]);
     s_state = new_state;
@@ -50,6 +50,9 @@ static void set_state(sm_state_t new_state) {
             break;
         case SM_STATE_SPEAKING:
             lcd_set_state(LCD_STATE_SPEAKING);
+            break;
+        case SM_STATE_SLEEP:
+            lcd_set_state(LCD_STATE_SLEEP);
             break;
     }
 }
@@ -74,8 +77,23 @@ static void playback_timer_cb(TimerHandle_t timer) {
 /* --------------------------------------------------------
  * メインイベントハンドラ
  * -------------------------------------------------------- */
+static void enter_sleep(void) {
+    xTimerStop(s_silence_timer, 0);
+    xTimerStop(s_playback_timer, 0);
+    audio_hal_stop_playback();
+    audio_hal_sleep();
+    lcd_sleep();
+    set_state(SM_STATE_SLEEP);
+}
+
 static void handle_event(sm_event_t event, const uint8_t *data,
                           size_t data_len) {
+    /* SM_EVENT_SLEEP はどの状態からでも受け付ける (SLEEP中は除く) */
+    if (event == SM_EVENT_SLEEP && s_state != SM_STATE_SLEEP) {
+        enter_sleep();
+        return;
+    }
+
     switch (s_state) {
         /* ---- IDLE: 待機中 ---- */
         case SM_STATE_IDLE:
@@ -135,6 +153,20 @@ static void handle_event(sm_event_t event, const uint8_t *data,
                 /* 再生完了: 待機へ */
                 xTimerStop(s_playback_timer, 0);
                 set_state(SM_STATE_IDLE);
+            }
+            break;
+
+        /* ---- SLEEP: スリープ中 ---- */
+        case SM_STATE_SLEEP:
+            if (event == SM_EVENT_WAKE) {
+                audio_hal_wake();
+                lcd_wake();
+                set_state(SM_STATE_IDLE);
+            } else if (event == SM_EVENT_WS_TTS_CHUNK) {
+                /* 通知等でTTS受信 → 自動復帰 */
+                audio_hal_wake();
+                lcd_wake();
+                set_state(SM_STATE_SPEAKING);
             }
             break;
     }

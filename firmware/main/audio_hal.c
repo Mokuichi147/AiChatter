@@ -30,6 +30,12 @@ static bool s_codec_available = false;
 /* 共有I2Cバスハンドル (pmic_lcd_power_on()で初期化, codec_init()で再利用) */
 static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
 
+/* PMICデバイスハンドル (sleep/wakeでAW8737制御に使用) */
+static i2c_master_dev_handle_t s_pmic_dev = NULL;
+
+/* マイクタスクハンドル (sleep/wakeでsuspend/resumeに使用) */
+static TaskHandle_t s_mic_task = NULL;
+
 /* 簡易VAD設定
  * ノイズフロア: rms²≈150〜300 (Philips I2S, PGA +24dB)
  * 発話時: rms²≈50,000以上 */
@@ -146,8 +152,7 @@ void pmic_lcd_power_on(void) {
         .device_address  = PMIC_I2C_ADDR,
         .scl_speed_hz    = 100000,
     };
-    i2c_master_dev_handle_t pmic_dev = NULL;
-    if (i2c_master_bus_add_device(s_i2c_bus_handle, &pmic_dev_cfg, &pmic_dev)
+    if (i2c_master_bus_add_device(s_i2c_bus_handle, &pmic_dev_cfg, &s_pmic_dev)
             != ESP_OK) {
         ESP_LOGW(TAG, "PMIC (0x%02X) デバイス追加失敗", PMIC_I2C_ADDR);
         return;
@@ -155,19 +160,19 @@ void pmic_lcd_power_on(void) {
     ESP_LOGI(TAG, "PMIC: デバイス追加完了 (0x%02X)", PMIC_I2C_ADDR);
 
     /* I2Cアイドルスリープ無効化 */
-    pmic_write_reg(pmic_dev, 0x09, 0x00);
+    pmic_write_reg(s_pmic_dev, 0x09, 0x00);
 
     /* GPIO0,2,3をGPIO機能に (代替機能OFF) */
-    pmic_write_reg(pmic_dev, 0x16, 0x00);
+    pmic_write_reg(s_pmic_dev, 0x16, 0x00);
 
     /* GPIO2,3を出力モード、GPIO0を入力モード */
-    pmic_write_reg(pmic_dev, 0x10, 0x0C);
+    pmic_write_reg(s_pmic_dev, 0x10, 0x0C);
 
     /* GPIO2,3をプッシュプルモード */
-    pmic_write_reg(pmic_dev, 0x13, 0x00);
+    pmic_write_reg(s_pmic_dev, 0x13, 0x00);
 
     /* GPIO2=HIGH(LCD電源ON), GPIO3=HIGH(AW8737/ES8311電源ON) */
-    pmic_write_reg(pmic_dev, 0x11, 0x0C);
+    pmic_write_reg(s_pmic_dev, 0x11, 0x0C);
 
     /* ES8311は電源投入後にI2Cスレーブが安定するまで時間が必要 */
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -466,7 +471,7 @@ void audio_hal_init(audio_rx_callback_t rx_cb, vad_event_callback_t vad_cb) {
 
     /* マイク入力タスク (Core 1): I2S RX → コールバック (AFEなし簡易版) */
     xTaskCreatePinnedToCore(mic_raw_task, "mic_raw",
-                             4096, NULL, 5, NULL, 1);
+                             4096, NULL, 5, &s_mic_task, 1);
 
     ESP_LOGI(TAG, "音声HAL初期化完了 (簡易VAD, AFEなし)");
 }
@@ -511,4 +516,33 @@ void audio_hal_notify_tts_end(void) {
 bool audio_hal_playback_done(void) {
     if (!s_playback_buf) return true;
     return s_playback_idle;
+}
+
+void audio_hal_sleep(void) {
+    /* マイクタスク停止 */
+    if (s_mic_task) {
+        vTaskSuspend(s_mic_task);
+        ESP_LOGI(TAG, "マイクタスク停止");
+    }
+
+    /* AW8737(アンプ)OFF: PMIC reg0x11 bit3=0, bit2=1(LCD電源維持) */
+    if (s_pmic_dev) {
+        pmic_write_reg(s_pmic_dev, 0x11, 0x04);
+        ESP_LOGI(TAG, "AW8737 OFF (PMIC GPIO3=LOW)");
+    }
+}
+
+void audio_hal_wake(void) {
+    /* AW8737(アンプ)ON: PMIC reg0x11 bit3=1, bit2=1 */
+    if (s_pmic_dev) {
+        pmic_write_reg(s_pmic_dev, 0x11, 0x0C);
+        vTaskDelay(pdMS_TO_TICKS(100));  /* 電源安定待ち */
+        ESP_LOGI(TAG, "AW8737 ON (PMIC GPIO3=HIGH)");
+    }
+
+    /* マイクタスク再開 */
+    if (s_mic_task) {
+        vTaskResume(s_mic_task);
+        ESP_LOGI(TAG, "マイクタスク再開");
+    }
 }

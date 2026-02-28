@@ -43,6 +43,11 @@ void ws_client_send_end_of_speech(void);
 void ws_client_send_interrupt(void);
 
 /**
+ * @brief ボタン押下をサーバーへ送信 (type=0x13)
+ */
+void ws_client_send_button(void);
+
+/**
  * @brief WebSocket接続状態を返す
  */
 bool ws_client_is_connected(void);
