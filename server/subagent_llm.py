@@ -2,7 +2,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from openai import AsyncOpenAI
+import litellm
 
 from config import settings
 
@@ -24,10 +24,7 @@ class SubAgentLLMResponse:
 
 class SubAgentLLM:
     def __init__(self) -> None:
-        self.client = AsyncOpenAI(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-        )
+        pass
 
     @staticmethod
     def _content_to_text(content: object) -> str:
@@ -56,12 +53,13 @@ class SubAgentLLM:
             "messages": messages,
             "temperature": 0.3,
             "max_tokens": 1200,
+            "num_ctx": settings.subagent_num_ctx,
         }
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        response = await self.client.chat.completions.create(**kwargs)
+        response = await litellm.acompletion(**kwargs)
         msg = response.choices[0].message
 
         tool_calls: list[SubAgentToolCall] = []

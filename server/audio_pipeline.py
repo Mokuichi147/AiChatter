@@ -247,6 +247,17 @@ class AudioPipeline:
 
             # ツール呼び出しがなければ終了
             if not tool_call_requests:
+                # 空応答（thinkタグ除去等）の場合、ツールなしで再試行
+                if not full_response.strip() and not self._interrupted and not self._ws_closed:
+                    logger.warning("LLM空応答を検出、ツールなしで再試行")
+                    messages.append({"role": "user", "content": "返答をお願いします。"})
+                    async for event in self.llm.generate_stream(messages, tools=None):
+                        if self._interrupted or self._ws_closed:
+                            break
+                        if isinstance(event, TextChunk):
+                            full_response += event.text
+                            logger.info(f"TTS合成(リトライ): '{event.text}'")
+                            await self._synthesize_and_send(event.text)
                 break
 
             # assistantメッセージ（tool_calls付き）を追加
@@ -386,7 +397,7 @@ class AudioPipeline:
                 await asyncio.sleep(0.5)
 
             async with self._pipeline_lock:
-                instruction = f"[通知] {text} — この内容をユーザーにキャラクターらしく伝えてください。"
+                instruction = f"[通知] {text} — ユーザーはこの結果を待っています。内容を要約してキャラクターらしく必ず伝えてください。"
                 system_prompt = self._build_system_prompt()
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(

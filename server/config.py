@@ -87,11 +87,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # LLM (OpenAI互換API)
-    llm_model: str = "glm-5:cloud"
+    # LLM (LiteLLM)
+    llm_model: str = "ollama_chat/glm-5:cloud"
     llm_sub_model: str = ""
-    llm_base_url: str = "http://localhost:11434/v1"
-    llm_api_key: str = "ollama"
 
     # ASR (mlx-audio Qwen3-ASR)
     asr_model: str = "mlx-community/Qwen3-ASR-0.6B-8bit"
@@ -108,6 +106,7 @@ class Settings(BaseSettings):
     tools_enabled: bool = True
     memory_file: str = "data/memory.json"
     tavily_api_key: str = ""
+    subagent_num_ctx: int = 128000
     subagent_enabled: bool = True
     subagent_max_rounds: int = 8
     subagent_timeout_sec: int = 45
