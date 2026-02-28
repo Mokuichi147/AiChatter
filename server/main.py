@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import struct
@@ -34,15 +35,38 @@ _asr = None
 _llm = None
 _tts = None
 _tool_registry = None
+_notification_store = None
+
+# アクティブなパイプライン管理
+_active_pipelines: list = []
 
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
     return struct.pack(">BHI", msg_type, seq & 0xFFFF, payload_len)
 
 
+async def _notification_scheduler() -> None:
+    """30秒間隔で期限到来の通知をチェックし、全アクティブpipelineに送信する。"""
+    while True:
+        await asyncio.sleep(30)
+        if _notification_store is None:
+            continue
+        due = _notification_store.pop_due()
+        if not due and not _active_pipelines:
+            continue
+        for notification in due:
+            message = notification.get("message", "")
+            logger.info(f"通知発火: id={notification.get('id')} msg={message}")
+            for pipeline in list(_active_pipelines):
+                try:
+                    await pipeline.generate_from_text(message)
+                except Exception as e:
+                    logger.error(f"通知送信エラー: {e}", exc_info=True)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _tool_registry
+    global _asr, _llm, _tts, _tool_registry, _notification_store
     if not ECHO_MODE:
         logger.info("AIモデルをプリロード中...")
         from local_asr import LocalASR
@@ -63,6 +87,12 @@ async def startup_event() -> None:
             )
             from tools.voice_control import SetVolumeTool
             from tools.search import SearchTool
+            from tools.notification import (
+                NotificationStore,
+                SetNotificationTool,
+                ListNotificationsTool,
+                DeleteNotificationTool,
+            )
 
             _tool_registry = ToolRegistry()
             memory_store = MemoryStore(settings.memory_file)
@@ -70,7 +100,15 @@ async def startup_event() -> None:
             _tool_registry.register(SearchMemoryTool(memory_store))
             _tool_registry.register(SetVolumeTool(_tts))
             _tool_registry.register(SearchTool())
+
+            _notification_store = NotificationStore(settings.notification_file)
+            _tool_registry.register(SetNotificationTool(_notification_store))
+            _tool_registry.register(ListNotificationsTool(_notification_store))
+            _tool_registry.register(DeleteNotificationTool(_notification_store))
             logger.info("ツールレジストリ初期化完了")
+
+        # 通知スケジューラー起動
+        asyncio.create_task(_notification_scheduler())
 
 
 @app.get("/health")
@@ -93,6 +131,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await websocket.send_bytes(data)
 
             pipeline = AudioPipeline(send_fn, _asr, _llm, _tts, _tool_registry)
+            _active_pipelines.append(pipeline)
             logger.info("AIパイプラインモード")
         except Exception as e:
             logger.warning(f"AIパイプライン初期化失敗 (エコーモードにフォールバック): {e}")
@@ -155,6 +194,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         logger.info(f"WebSocket切断: {client_host}")
     except Exception as e:
         logger.error(f"WebSocketエラー: {e}", exc_info=True)
+    finally:
+        if pipeline and pipeline in _active_pipelines:
+            _active_pipelines.remove(pipeline)
 
 
 if __name__ == "__main__":

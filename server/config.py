@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     history_file: str = "data/history.json"
     history_restore_count: int = 3
 
+    # 通知の永続化
+    notification_file: str = "data/notifications.json"
+
     # サーバー設定
     host: str = "0.0.0.0"
     port: int = 8765
