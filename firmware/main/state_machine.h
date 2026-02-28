@@ -27,6 +27,8 @@ typedef enum {
     SM_EVENT_PLAYBACK_DONE,       /**< 再生バッファ空 (再生完了) */
     SM_EVENT_SLEEP,               /**< スリープ要求 */
     SM_EVENT_WAKE,                /**< ウェイク要求 */
+    SM_EVENT_WS_DISCONNECTED,     /**< WebSocket切断 */
+    SM_EVENT_WS_CONNECTED,        /**< WebSocket再接続 */
 } sm_event_t;
 
 /**

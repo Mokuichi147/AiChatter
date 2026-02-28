@@ -45,10 +45,14 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
     switch (event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "WebSocket接続完了");
+            s_reassembly_len = 0;
+            s_reassembly_expected = 0;
+            state_machine_post_event(SM_EVENT_WS_CONNECTED, NULL, 0);
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "WebSocket切断 (自動再接続待機中...)");
+            state_machine_post_event(SM_EVENT_WS_DISCONNECTED, NULL, 0);
             break;
 
         case WEBSOCKET_EVENT_ERROR:

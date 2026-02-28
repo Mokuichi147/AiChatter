@@ -94,6 +94,22 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         return;
     }
 
+    /* WebSocket切断: どの状態でもIDLEにリセット (SLEEP中は除く) */
+    if (event == SM_EVENT_WS_DISCONNECTED && s_state != SM_STATE_SLEEP) {
+        ESP_LOGW(TAG, "WebSocket切断 → IDLEへリセット");
+        xTimerStop(s_silence_timer, 0);
+        xTimerStop(s_playback_timer, 0);
+        audio_hal_stop_playback();
+        set_state(SM_STATE_IDLE);
+        return;
+    }
+
+    /* WebSocket再接続: ログのみ (IDLEのまま正常動作) */
+    if (event == SM_EVENT_WS_CONNECTED) {
+        ESP_LOGI(TAG, "WebSocket再接続");
+        return;
+    }
+
     switch (s_state) {
         /* ---- IDLE: 待機中 ---- */
         case SM_STATE_IDLE:

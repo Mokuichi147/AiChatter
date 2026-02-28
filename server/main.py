@@ -219,6 +219,6 @@ if __name__ == "__main__":
         host=settings.host,
         port=settings.port,
         log_level="info",
-        ws_ping_interval=None,
-        ws_ping_timeout=None,
+        ws_ping_interval=30,
+        ws_ping_timeout=30,
     )
