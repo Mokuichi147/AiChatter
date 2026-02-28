@@ -11,7 +11,7 @@ from config import character
 logger = logging.getLogger(__name__)
 
 TARGET_SAMPLE_RATE = 16000  # ESP32側の受信サンプルレート
-VOLUME_SCALE = 4096  # 音量スケール (12.5%)
+VOLUME_SCALE = 2048  # 音量スケール (6.25%)
 VOICES_DIR = Path(__file__).parent / "voices"
 
 # TTS合成可能な文字のみ残す (日本語・英数字・句読点・記号)
