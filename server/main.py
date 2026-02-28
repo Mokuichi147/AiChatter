@@ -37,6 +37,7 @@ _llm = None
 _tts = None
 _tool_registry = None
 _notification_store = None
+_memory_store = None
 
 # アクティブなパイプライン管理
 _active_pipelines: list = []
@@ -67,7 +68,7 @@ async def _notification_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _tool_registry, _notification_store
+    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store
     if not ECHO_MODE:
         logger.info("AIモデルをプリロード中...")
         from local_asr import LocalASR
@@ -98,7 +99,8 @@ async def startup_event() -> None:
             from tools.sleep_control import SetSleepTool
 
             _tool_registry = ToolRegistry()
-            memory_store = MemoryStore(settings.memory_file)
+            _memory_store = MemoryStore(settings.memory_file)
+            memory_store = _memory_store
             _tool_registry.register(SaveMemoryTool(memory_store))
             _tool_registry.register(SearchMemoryTool(memory_store))
             _tool_registry.register(DeleteMemoryTool(memory_store))
@@ -135,7 +137,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             async def send_fn(data: bytes) -> None:
                 await websocket.send_bytes(data)
 
-            pipeline = AudioPipeline(send_fn, _asr, _llm, _tts, _tool_registry)
+            pipeline = AudioPipeline(send_fn, _asr, _llm, _tts, _tool_registry, _memory_store)
             _active_pipelines.append(pipeline)
             logger.info("AIパイプラインモード")
         except Exception as e:

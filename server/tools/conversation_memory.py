@@ -3,9 +3,14 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from rank_bm25 import BM25Okapi
+from sudachipy import Dictionary, SplitMode
 from tools.base import ToolBase, ToolResult
 
 logger = logging.getLogger(__name__)
+
+_sudachi_tokenizer = Dictionary().create()
+_STOP_POS = {"助詞", "助動詞", "記号", "空白", "補助記号"}
 
 
 class MemoryStore:
@@ -33,10 +38,11 @@ class MemoryStore:
             encoding="utf-8",
         )
 
-    def save(self, key: str, content: str) -> None:
+    def save(self, key: str, content: str, *, auto: bool = False) -> None:
         self._data[key] = {
             "content": content,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "auto": auto,
         }
         self._save()
 
@@ -47,8 +53,18 @@ class MemoryStore:
             return True
         return False
 
-    def search(self, query: str, after: str = "", before: str = "") -> list[dict]:
-        query_lower = query.lower()
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        morphemes = _sudachi_tokenizer.tokenize(text, SplitMode.C)
+        return [
+            m.normalized_form()
+            for m in morphemes
+            if m.part_of_speech()[0] not in _STOP_POS
+        ]
+
+    def search(
+        self, query: str, after: str = "", before: str = "", include_auto: bool = True,
+    ) -> list[dict]:
         after_dt = None
         before_dt = None
         if after:
@@ -62,14 +78,12 @@ class MemoryStore:
             except ValueError:
                 pass
 
-        results = []
+        # 日付・autoフィルタで候補を絞る
+        candidates: list[tuple[str, dict]] = []
         for key, entry in self._data.items():
-            content = entry.get("content", "")
-            created_at = entry.get("created_at", "")
-
-            if query_lower not in key.lower() and query_lower not in content.lower():
+            if not include_auto and entry.get("auto", False):
                 continue
-
+            created_at = entry.get("created_at", "")
             if (after_dt or before_dt) and created_at:
                 try:
                     entry_dt = datetime.strptime(created_at[:10], "%Y-%m-%d")
@@ -79,13 +93,41 @@ class MemoryStore:
                     continue
                 if before_dt and entry_dt > before_dt:
                     continue
+            candidates.append((key, entry))
 
-            results.append({
-                "key": key,
-                "content": content,
-                "created_at": created_at,
-            })
-        return results
+        if not candidates:
+            return []
+
+        # BM25コーパス構築
+        corpus_tokens = []
+        for key, entry in candidates:
+            text = key + " " + entry.get("content", "")
+            corpus_tokens.append(self._tokenize(text))
+
+        bm25 = BM25Okapi(corpus_tokens)
+        query_tokens = self._tokenize(query)
+        scores = bm25.get_scores(query_tokens) if query_tokens else [0.0] * len(candidates)
+
+        # 部分文字列一致ボーナス
+        query_lower = query.lower()
+        SUBSTRING_BONUS = 5.0
+
+        results = []
+        for i, (key, entry) in enumerate(candidates):
+            score = float(scores[i])
+            content = entry.get("content", "")
+            if query_lower in key.lower() or query_lower in content.lower():
+                score += SUBSTRING_BONUS
+            if score > 0:
+                results.append({
+                    "key": key,
+                    "content": content,
+                    "created_at": entry.get("created_at", ""),
+                    "score": round(score, 3),
+                })
+
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:10]
 
 
 class SaveMemoryTool(ToolBase):
@@ -121,7 +163,7 @@ class SaveMemoryTool(ToolBase):
 
 class SearchMemoryTool(ToolBase):
     name = "search_memory"
-    description = "保存された記憶を検索します。日付で絞り込むこともできます。"
+    description = "保存された記憶や過去の会話履歴を検索します。日付で絞り込んだり、include_autoで会話履歴を除外できます。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -137,6 +179,11 @@ class SearchMemoryTool(ToolBase):
                 "type": "string",
                 "description": "この日付以前の記憶を検索 (YYYY-MM-DD形式、省略可)",
             },
+            "include_auto": {
+                "type": "boolean",
+                "description": "自動記録（会話履歴など）を含めるか (デフォルト: true)",
+                "default": True,
+            },
         },
         "required": ["query"],
     }
@@ -148,8 +195,12 @@ class SearchMemoryTool(ToolBase):
         query = kwargs.get("query", "")
         if not query:
             return ToolResult(content="queryは必須です", is_error=True)
+        include_auto = kwargs.get("include_auto", True)
         results = self._store.search(
-            query, after=kwargs.get("after", ""), before=kwargs.get("before", ""),
+            query,
+            after=kwargs.get("after", ""),
+            before=kwargs.get("before", ""),
+            include_auto=include_auto,
         )
         if not results:
             return ToolResult(content="該当する記憶が見つかりませんでした。")

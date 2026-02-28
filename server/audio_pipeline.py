@@ -36,12 +36,14 @@ class AudioPipeline:
         llm: LocalLLM,
         tts: LocalTTS,
         tool_registry=None,
+        memory_store=None,
     ) -> None:
         self.send_fn = send_fn
         self.asr = asr
         self.llm = llm
         self.tts = tts
         self.tool_registry = tool_registry
+        self.memory_store = memory_store
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
@@ -289,6 +291,12 @@ class AudioPipeline:
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
                 self._save_history()
+
+                # メモリストアにも会話を自動記録
+                if self.memory_store:
+                    key = f"conv_{now_str.replace(' ', '_').replace(':', '')}"
+                    content = f"ユーザー: {user_text}\nアシスタント: {full_response}"
+                    self.memory_store.save(key, content, auto=True)
 
     async def _run_pipeline(self, audio_data: bytes) -> None:
         tts_end_sent = False
