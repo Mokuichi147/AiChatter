@@ -26,6 +26,7 @@ static QueueHandle_t  s_event_queue  = NULL;
 static TimerHandle_t  s_silence_timer = NULL;
 static TimerHandle_t  s_playback_timer = NULL;
 static volatile sm_state_t s_state   = SM_STATE_IDLE;
+static bool s_sleep_pending = false;  /* 再生完了後にスリープする予約 */
 
 /* --------------------------------------------------------
  * 状態遷移ヘルパー
@@ -90,7 +91,13 @@ static void handle_event(sm_event_t event, const uint8_t *data,
                           size_t data_len) {
     /* SM_EVENT_SLEEP はどの状態からでも受け付ける (SLEEP中は除く) */
     if (event == SM_EVENT_SLEEP && s_state != SM_STATE_SLEEP) {
-        enter_sleep();
+        if (s_state == SM_STATE_SPEAKING) {
+            /* 再生中: 再生完了後にスリープする予約 */
+            s_sleep_pending = true;
+            ESP_LOGI(TAG, "スリープ予約 (再生完了後に実行)");
+        } else {
+            enter_sleep();
+        }
         return;
     }
 
@@ -166,9 +173,14 @@ static void handle_event(sm_event_t event, const uint8_t *data,
                 /* TTS受信完了: 再生バッファが空になるまで待つ */
                 xTimerStart(s_playback_timer, 0);
             } else if (event == SM_EVENT_PLAYBACK_DONE) {
-                /* 再生完了: 待機へ */
+                /* 再生完了 */
                 xTimerStop(s_playback_timer, 0);
-                set_state(SM_STATE_IDLE);
+                if (s_sleep_pending) {
+                    s_sleep_pending = false;
+                    enter_sleep();
+                } else {
+                    set_state(SM_STATE_IDLE);
+                }
             }
             break;
 

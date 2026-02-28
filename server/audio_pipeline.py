@@ -275,8 +275,8 @@ class AudioPipeline:
             logger.info("TTS完了送信")
 
             # スリープ予約がある場合、TTS完了後に送信
+            # (デバイス側で再生完了を待ってからスリープに入る)
             if self._sleep_after_tts:
-                await asyncio.sleep(0.3)  # 再生完了まで少し待つ
                 await self._send_sleep_now()
 
             # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
