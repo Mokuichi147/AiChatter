@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     # ツール設定
     tools_enabled: bool = True
     memory_file: str = "data/memory.json"
+    tavily_api_key: str = ""
 
     # 会話履歴の永続化
     history_file: str = "data/history.json"
