@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from collections import deque
 
 from subagent.models import SubAgentJob, SubAgentJobRequest, now_str
 from subagent.runner import SubAgentRunner
@@ -14,6 +15,7 @@ class SubAgentJobManager:
         self._timeout_sec = max(5, timeout_sec)
         self._jobs: dict[str, SubAgentJob] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._completed_messages: deque[str] = deque()
         self._lock = asyncio.Lock()
 
     async def submit_job(self, req: SubAgentJobRequest) -> str:
@@ -45,6 +47,7 @@ class SubAgentJobManager:
                 job.status = "timed_out"
                 job.error = f"タイムアウトしました ({self._timeout_sec}秒)"
                 job.finished_at = now_str()
+                self._completed_messages.append(self._build_completion_message(job))
         except Exception as e:
             logger.error(f"サブエージェントジョブ失敗: {job_id} error={e}", exc_info=True)
             async with self._lock:
@@ -52,12 +55,14 @@ class SubAgentJobManager:
                 job.status = "failed"
                 job.error = str(e)
                 job.finished_at = now_str()
+                self._completed_messages.append(self._build_completion_message(job))
         else:
             async with self._lock:
                 job = self._jobs[job_id]
                 job.status = "succeeded"
                 job.result = result
                 job.finished_at = now_str()
+                self._completed_messages.append(self._build_completion_message(job))
         finally:
             self._tasks.pop(job_id, None)
 
@@ -79,3 +84,39 @@ class SubAgentJobManager:
         async with self._lock:
             job = self._jobs.get(job_id)
             return job.to_detail_dict() if job else None
+
+    async def pop_completed_messages(self, limit: int = 10) -> list[str]:
+        messages: list[str] = []
+        limit = min(max(1, limit), 100)
+        async with self._lock:
+            while self._completed_messages and len(messages) < limit:
+                messages.append(self._completed_messages.popleft())
+        return messages
+
+    async def requeue_completed_messages(self, messages: list[str]) -> None:
+        if not messages:
+            return
+        async with self._lock:
+            for message in reversed(messages):
+                self._completed_messages.appendleft(message)
+
+    @staticmethod
+    def _build_completion_message(job: SubAgentJob) -> str:
+        header = (
+            "[サブエージェント完了]\n"
+            f"job_id: {job.job_id}\n"
+            f"status: {job.status}\n"
+            f"goal: {job.request.goal}\n"
+        )
+        if job.status == "succeeded" and job.result is not None:
+            findings = "\n".join(f"- {v}" for v in job.result.findings[:5])
+            evidence = "\n".join(f"- {v}" for v in job.result.evidence[:5])
+            body = (
+                f"answer: {job.result.answer}\n"
+                "findings:\n"
+                f"{findings or '- (なし)'}\n"
+                "evidence:\n"
+                f"{evidence or '- (なし)'}"
+            )
+            return header + body
+        return header + f"error: {job.error or '不明なエラー'}"

@@ -67,6 +67,37 @@ async def _notification_scheduler() -> None:
                     logger.error(f"通知送信エラー: {e}", exc_info=True)
 
 
+async def _subagent_result_scheduler() -> None:
+    """完了したサブエージェント結果をメインエージェントへ通知として渡す。"""
+    while True:
+        await asyncio.sleep(5)
+        if _subagent_job_manager is None:
+            continue
+        if not _active_pipelines:
+            # 送信先がいない間はキューを保持する
+            continue
+
+        messages = await _subagent_job_manager.pop_completed_messages(limit=20)
+        if not messages:
+            continue
+
+        undelivered: list[str] = []
+        for message in messages:
+            logger.info("サブエージェント結果通知を送信")
+            delivered = False
+            for pipeline in list(_active_pipelines):
+                try:
+                    await pipeline.generate_from_text(message)
+                    delivered = True
+                except Exception as e:
+                    logger.error(f"サブエージェント結果通知エラー: {e}", exc_info=True)
+            if not delivered:
+                undelivered.append(message)
+
+        if undelivered:
+            await _subagent_job_manager.requeue_completed_messages(undelivered)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager
@@ -152,6 +183,7 @@ async def startup_event() -> None:
 
         # 通知スケジューラー起動
         asyncio.create_task(_notification_scheduler())
+        asyncio.create_task(_subagent_result_scheduler())
 
 
 @app.get("/health")
