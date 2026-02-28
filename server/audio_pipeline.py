@@ -79,13 +79,17 @@ class AudioPipeline:
             logger.warning(f"会話履歴の読み込み失敗: {e}")
             return []
 
-    def _save_history(self) -> None:
-        """会話履歴をJSONファイルに永続化する。"""
+    def _save_history(self, new_entries: list[dict]) -> None:
+        """新しい会話エントリをファイルに追記する。"""
         path = self._history_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            existing = []
+            if path.exists():
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            existing.extend(new_entries)
             path.write_text(
-                json.dumps(self._history, ensure_ascii=False, indent=2),
+                json.dumps(existing, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except OSError as e:
@@ -304,15 +308,14 @@ class AudioPipeline:
             # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
             if full_response:
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                self._history.append(
-                    {"role": "user", "content": user_text, "created_at": now_str}
-                )
-                self._history.append(
-                    {"role": "assistant", "content": full_response, "created_at": now_str}
-                )
+                user_entry = {"role": "user", "content": user_text, "created_at": now_str}
+                assistant_entry = {"role": "assistant", "content": full_response, "created_at": now_str}
+                self._history.append(user_entry)
+                self._history.append(assistant_entry)
+                # メモリ上は直近分のみ保持、ファイルには全件蓄積
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
-                self._save_history()
+                self._save_history([user_entry, assistant_entry])
 
                 # メモリストアにも会話を自動記録
                 if self.memory_store:
@@ -341,7 +344,10 @@ class AudioPipeline:
                 system_prompt = self._build_system_prompt()
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(
-                    {"role": h["role"], "content": h["content"]}
+                    {
+                        "role": h["role"],
+                        "content": f"[{h['created_at']}] {h['content']}" if h["role"] == "user" and h.get("created_at") else h["content"],
+                    }
                     for h in self._history
                 )
                 messages.append({"role": "user", "content": text})
@@ -401,7 +407,10 @@ class AudioPipeline:
                 system_prompt = self._build_system_prompt()
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(
-                    {"role": h["role"], "content": h["content"]}
+                    {
+                        "role": h["role"],
+                        "content": f"[{h['created_at']}] {h['content']}" if h["role"] == "user" and h.get("created_at") else h["content"],
+                    }
                     for h in self._history
                 )
                 messages.append({"role": "user", "content": instruction})
