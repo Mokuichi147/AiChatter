@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -6,12 +7,19 @@ from typing import Iterator
 
 import numpy as np
 
-from config import character
+from config import character, character_data_path
 
 logger = logging.getLogger(__name__)
 
 TARGET_SAMPLE_RATE = 16000  # ESP32側の受信サンプルレート
-DEFAULT_VOLUME_SCALE = 2048  # 音量スケール (6.25%)
+DEFAULT_VOLUME_SCALE = 3275  # 音量スケール (level 5相当)
+
+
+def _level_to_scale(level: int) -> int:
+    """音量レベル(1-10)をスケール値に変換する。"""
+    return int(655 * max(1, min(10, level)))
+
+
 VOICES_DIR = Path(__file__).parent / "voices"
 
 # TTS合成可能な文字のみ残す (日本語・英数字・句読点・記号)
@@ -27,7 +35,7 @@ class LocalTTS:
         from scipy import signal as _signal
 
         self._resample = _signal.resample_poly
-        self.volume_scale: int = DEFAULT_VOLUME_SCALE
+        self.volume_scale: int = self._load_volume_scale()
 
         voice_config = character.voice
         self.voice_config = voice_config
@@ -49,6 +57,24 @@ class LocalTTS:
             f"TTSモデル読み込み完了 (参照音声: {self.ref_audio}, "
             f"サンプルレート: {self.model_sample_rate}Hz)"
         )
+
+    @staticmethod
+    def _load_volume_scale() -> int:
+        """settings.jsonから音量レベルを読み込みスケール値を返す。"""
+        try:
+            settings_path = Path(character_data_path("settings.json"))
+            if not settings_path.is_absolute():
+                settings_path = Path(__file__).parent / settings_path
+            if settings_path.exists():
+                data = json.loads(settings_path.read_text(encoding="utf-8"))
+                level = data.get("volume_level")
+                if isinstance(level, int):
+                    scale = _level_to_scale(level)
+                    logger.info(f"音量設定を復元: level={level}, scale={scale}")
+                    return scale
+        except Exception as e:
+            logger.warning(f"音量設定の読み込みに失敗: {e}")
+        return DEFAULT_VOLUME_SCALE
 
     def _prepare_reference(self, voice_config) -> tuple[str, str]:
         """声タイプに応じて参照音声ファイルのパスとトランスクリプトを返す。"""
