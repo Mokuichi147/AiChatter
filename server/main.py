@@ -356,6 +356,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AiChatter Server")
+    parser.add_argument("-c", "--character", help="キャラクター設定ファイルのパス")
+    args = parser.parse_args()
+
+    if args.character:
+        import config as _config
+        from config import load_character
+
+        _config.character = load_character(args.character)
+
     mode = "エコー" if ECHO_MODE else "AI"
     logger.info(f"サーバー起動: {settings.host}:{settings.port} ({mode}モード)")
     if not ECHO_MODE:
