@@ -26,7 +26,8 @@ server/data/
 *.env.local
 
 # キャラクター設定（ユーザーカスタマイズ用）
-server/character.yaml
+server/character*.yaml
+!server/character.example.yaml
 
 # プロンプト設定（ユーザーカスタマイズ用）
 server/prompt.yaml
