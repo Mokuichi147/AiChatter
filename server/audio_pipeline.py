@@ -142,6 +142,23 @@ class AudioPipeline:
 
         self._audio_buffer.clear()
 
+    async def close(self) -> None:
+        """パイプラインの進行中処理を停止し、参照を解放する。"""
+        self._interrupted = True
+        self._ws_closed = True
+        self._sleep_after_tts = False
+        self._audio_buffer.clear()
+
+        if self._current_task and not self._current_task.done():
+            self._current_task.cancel()
+            try:
+                await self._current_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"パイプラインクローズ時のタスク停止失敗: {e}")
+        self._current_task = None
+
     async def _safe_send(self, data: bytes) -> bool:
         """WebSocketへ安全に送信する。失敗時はFalseを返す。"""
         try:

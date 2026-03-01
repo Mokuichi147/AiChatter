@@ -100,6 +100,25 @@ class SubAgentJobManager:
             for message in reversed(messages):
                 self._completed_messages.appendleft(message)
 
+    async def shutdown(self) -> None:
+        """実行中ジョブをキャンセルして終了する。"""
+        tasks = list(self._tasks.values())
+        if not tasks:
+            return
+
+        logger.info(f"サブエージェント実行中ジョブ停止: {len(tasks)}件")
+        for task in tasks:
+            task.cancel()
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.warning(f"サブエージェント停止中エラー: {result}")
+
+        self._tasks.clear()
+
     @staticmethod
     def _build_completion_message(job: SubAgentJob) -> str:
         header = (

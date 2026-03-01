@@ -1,4 +1,6 @@
 import asyncio
+import gc
+import inspect
 import logging
 import os
 import struct
@@ -39,6 +41,7 @@ _tool_registry = None
 _notification_store = None
 _memory_store = None
 _subagent_job_manager = None
+_scheduler_tasks: list[asyncio.Task] = []
 
 # アクティブなパイプライン管理
 _active_pipelines: list = []
@@ -46,6 +49,23 @@ _active_pipelines: list = []
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
     return struct.pack(">BHI", msg_type, seq & 0xFFFF, payload_len)
+
+
+async def _close_component(name: str, component: object | None) -> None:
+    """close/shutdownを持つコンポーネントを安全に終了させる。"""
+    if component is None:
+        return
+
+    close_fn = getattr(component, "close", None) or getattr(component, "shutdown", None)
+    if not callable(close_fn):
+        return
+
+    try:
+        result = close_fn()
+        if inspect.isawaitable(result):
+            await result
+    except Exception as e:
+        logger.warning(f"{name} の終了処理でエラー: {e}", exc_info=True)
 
 
 async def _notification_scheduler() -> None:
@@ -100,7 +120,7 @@ async def _subagent_result_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager
+    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager, _scheduler_tasks
     if not ECHO_MODE:
         logger.info("AIモデルをプリロード中...")
         from local_asr import LocalASR
@@ -185,8 +205,55 @@ async def startup_event() -> None:
             logger.info("ツールレジストリ初期化完了")
 
         # 通知スケジューラー起動
-        asyncio.create_task(_notification_scheduler())
-        asyncio.create_task(_subagent_result_scheduler())
+        _scheduler_tasks = [
+            asyncio.create_task(_notification_scheduler(), name="notification_scheduler"),
+            asyncio.create_task(
+                _subagent_result_scheduler(), name="subagent_result_scheduler"
+            ),
+        ]
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager, _scheduler_tasks
+
+    logger.info("シャットダウン処理開始")
+
+    if _scheduler_tasks:
+        for task in _scheduler_tasks:
+            task.cancel()
+        results = await asyncio.gather(*_scheduler_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.warning(f"スケジューラー停止中にエラー: {result}")
+        _scheduler_tasks.clear()
+
+    if _active_pipelines:
+        pipelines = list(_active_pipelines)
+        _active_pipelines.clear()
+        for pipeline in pipelines:
+            try:
+                await pipeline.close()
+            except Exception as e:
+                logger.warning(f"パイプライン終了処理でエラー: {e}", exc_info=True)
+
+    await _close_component("subagent_job_manager", _subagent_job_manager)
+    await _close_component("tts", _tts)
+    await _close_component("llm", _llm)
+    await _close_component("asr", _asr)
+
+    _subagent_job_manager = None
+    _notification_store = None
+    _memory_store = None
+    _tool_registry = None
+    _tts = None
+    _llm = None
+    _asr = None
+
+    gc.collect()
+    logger.info("シャットダウン処理完了")
 
 
 @app.get("/health")
@@ -278,6 +345,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     finally:
         if pipeline and pipeline in _active_pipelines:
             _active_pipelines.remove(pipeline)
+        if pipeline:
+            try:
+                await pipeline.close()
+            except Exception as e:
+                logger.warning(f"WebSocket終了時のパイプライン解放失敗: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
