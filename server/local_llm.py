@@ -33,31 +33,47 @@ class LocalLLM:
         self._sentence_pattern = re.compile(r"(?<=[。！？\.\!\?])\s*")
 
     @staticmethod
-    def _strip_think_tags(text: str, in_think: bool) -> tuple[str, bool]:
+    def _strip_think_tags(
+        text: str, in_think: bool,
+    ) -> tuple[str, bool, str]:
         """テキストから<think>...</think>タグ部分を除去する。
 
+        チャンク境界でタグが分割されるケースに対応するため、
+        末尾にタグの部分一致がある場合は pending として返す。
+
         Returns:
-            (除去済みテキスト, thinkタグ内にいるかのフラグ)
+            (除去済みテキスト, thinkタグ内にいるか, 次チャンクへ持ち越すpending)
         """
+        _OPEN = "<think>"
+        _CLOSE = "</think>"
         result: list[str] = []
         pos = 0
         while pos < len(text):
             if in_think:
-                end = text.find("</think>", pos)
+                end = text.find(_CLOSE, pos)
                 if end == -1:
-                    # タグが閉じていない → 残り全部破棄
-                    break
-                pos = end + len("</think>")
+                    # 末尾が </think> の部分一致なら pending へ
+                    for i in range(min(len(_CLOSE) - 1, len(text) - pos), 0, -1):
+                        if text[-i:] == _CLOSE[:i]:
+                            return "".join(result), True, text[-i:]
+                    return "".join(result), True, ""
+                pos = end + len(_CLOSE)
                 in_think = False
             else:
-                start = text.find("<think>", pos)
+                start = text.find(_OPEN, pos)
                 if start == -1:
-                    result.append(text[pos:])
-                    break
+                    # 末尾が <think> の部分一致なら pending へ
+                    remaining = text[pos:]
+                    for i in range(min(len(_OPEN) - 1, len(remaining)), 0, -1):
+                        if remaining[-i:] == _OPEN[:i]:
+                            result.append(remaining[:-i])
+                            return "".join(result), False, remaining[-i:]
+                    result.append(remaining)
+                    return "".join(result), False, ""
                 result.append(text[pos:start])
-                pos = start + len("<think>")
+                pos = start + len(_OPEN)
                 in_think = True
-        return "".join(result), in_think
+        return "".join(result), in_think, ""
 
     @staticmethod
     def _split_json_objects(raw: str) -> list[str]:
@@ -113,6 +129,7 @@ class LocalLLM:
 
         buffer = ""
         in_think = False
+        pending = ""  # チャンク境界のタグ部分一致を持ち越すバッファ
         raw_content = ""  # デバッグ用: LLM生出力の記録
         # tool_calls断片を組み立てるためのバッファ
         tool_calls_buf: dict[int, dict] = {}
@@ -124,8 +141,9 @@ class LocalLLM:
             # テキスト応答の処理
             if delta.content:
                 raw_content += delta.content
-                clean, in_think = self._strip_think_tags(
-                    delta.content, in_think
+                text = pending + delta.content
+                clean, in_think, pending = self._strip_think_tags(
+                    text, in_think
                 )
                 if clean:
                     buffer += clean
@@ -158,6 +176,10 @@ class LocalLLM:
                             entry["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
                             entry["arguments"] += tc_delta.function.arguments
+
+        # pendingに残ったテキストをフラッシュ（タグ未完成＝通常テキスト）
+        if pending and not in_think:
+            buffer += pending
 
         # LLM生出力をログ（thinkタグ除去前）
         if raw_content and not buffer.strip():
