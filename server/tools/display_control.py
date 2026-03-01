@@ -1,10 +1,13 @@
 import base64
 import binascii
+import io
 import logging
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
+
+import httpx
 
 from tools.base import ToolBase, ToolResult
 
@@ -13,6 +16,7 @@ logger = logging.getLogger(__name__)
 SCREEN_WIDTH = 135
 SCREEN_HEIGHT = 240
 STATUS_BAR_Y = 10
+HTTP_TIMEOUT_SEC = 20.0
 
 FONT_PIXELS_BY_SIZE = {
     1: 14,
@@ -39,6 +43,13 @@ except ImportError:  # pragma: no cover
     ImageDraw = None
     ImageFont = None
 
+try:
+    import resvg_py
+    _resvg_error = ""
+except Exception as e:  # pragma: no cover
+    resvg_py = None
+    _resvg_error = str(e)
+
 
 def _rgb888_to_rgb565_be(rgb888: bytes) -> bytes:
     out = bytearray((len(rgb888) // 3) * 2)
@@ -61,6 +72,34 @@ def _fit_size(raw_w: int, raw_h: int, max_w: int, max_h: int) -> tuple[int, int]
     w = max(1, int(round(raw_w * scale)))
     h = max(1, int(round(raw_h * scale)))
     return w, h
+
+
+def _calc_target_size(
+    raw_w: int,
+    raw_h: int,
+    req_width: int | None,
+    req_height: int | None,
+    max_w: int,
+    max_h: int,
+) -> tuple[int, int]:
+    if raw_w <= 0 or raw_h <= 0:
+        return 0, 0
+
+    if req_width is not None and req_height is not None:
+        width, height = req_width, req_height
+    elif req_width is not None:
+        width = req_width
+        height = max(1, int(round(raw_h * (req_width / raw_w))))
+    elif req_height is not None:
+        height = req_height
+        width = max(1, int(round(raw_w * (req_height / raw_h))))
+    else:
+        width, height = raw_w, raw_h
+
+    if width > max_w or height > max_h:
+        width, height = _fit_size(width, height, max_w, max_h)
+
+    return width, height
 
 
 @lru_cache(maxsize=1)
@@ -181,6 +220,162 @@ def _render_text_to_rgb565(
     return rgb565, rendered.width, rendered.height
 
 
+def _render_pil_to_rgb565(
+    image,
+    req_width: int | None,
+    req_height: int | None,
+    x: int,
+    y: int,
+) -> tuple[bytes, int, int] | ToolResult:
+    if Image is None:
+        return ToolResult(content="Pillow未インストールのため画像描画できません。", is_error=True)
+
+    raw_w, raw_h = image.size
+    max_w = SCREEN_WIDTH - x
+    max_h = SCREEN_HEIGHT - y
+    width, height = _calc_target_size(raw_w, raw_h, req_width, req_height, max_w, max_h)
+
+    if width <= 0 or height <= 0:
+        return ToolResult(content="描画可能な画像サイズを計算できませんでした。", is_error=True)
+
+    if (width, height) != image.size:
+        resampling = getattr(Image, "Resampling", Image)
+        image = image.resize((width, height), resampling.LANCZOS)
+
+    image = image.convert("RGB")
+    rgb565 = _rgb888_to_rgb565_be(image.tobytes())
+    return rgb565, width, height
+
+
+def _load_raster_bytes(
+    data: bytes,
+    req_width: int | None,
+    req_height: int | None,
+    x: int,
+    y: int,
+) -> tuple[bytes, int, int] | ToolResult:
+    if Image is None:
+        return ToolResult(content="Pillow未インストールのため画像表示できません。", is_error=True)
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            rgb = img.convert("RGB")
+            return _render_pil_to_rgb565(rgb, req_width, req_height, x, y)
+    except Exception as e:
+        return ToolResult(content=f"画像デコードエラー: {e}", is_error=True)
+
+
+def _load_svg_text(
+    svg_text: str,
+    req_width: int | None,
+    req_height: int | None,
+    x: int,
+    y: int,
+) -> tuple[bytes, int, int] | ToolResult:
+    if resvg_py is None:
+        detail = f" ({_resvg_error})" if _resvg_error else ""
+        return ToolResult(
+            content=(
+                "SVG表示には resvg-py が必要です。"
+                f"`cd server && uv sync` を実行してください。{detail}"
+            ),
+            is_error=True,
+        )
+
+    try:
+        png_bytes = resvg_py.svg_to_bytes(
+            svg_string=svg_text,
+            width=req_width,
+            height=req_height,
+        )
+    except Exception as e:
+        return ToolResult(content=f"SVGレンダリングエラー: {e}", is_error=True)
+
+    # SVG側でサイズ指定済みなので、ここでは画面内フィットのみ行う
+    return _load_raster_bytes(png_bytes, None, None, x, y)
+
+
+def _fetch_url_bytes(url: str) -> tuple[bytes, str] | ToolResult:
+    if not url.lower().startswith(("http://", "https://")):
+        return ToolResult(content="image_url は http:// または https:// を指定してください。", is_error=True)
+
+    try:
+        response = httpx.get(url, follow_redirects=True, timeout=HTTP_TIMEOUT_SEC)
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").lower()
+        return response.content, content_type
+    except Exception as e:
+        return ToolResult(content=f"URL取得エラー: {e}", is_error=True)
+
+
+def _load_from_url(
+    image_url: str,
+    req_width: int | None,
+    req_height: int | None,
+    x: int,
+    y: int,
+) -> tuple[bytes, int, int] | ToolResult:
+    fetched = _fetch_url_bytes(image_url)
+    if isinstance(fetched, ToolResult):
+        return fetched
+    data, content_type = fetched
+
+    looks_like_svg = (
+        "svg" in content_type
+        or image_url.split("?", 1)[0].lower().endswith(".svg")
+        or data.lstrip().startswith(b"<svg")
+    )
+
+    if looks_like_svg:
+        try:
+            svg_text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            svg_text = data.decode("utf-8", errors="replace")
+        return _load_svg_text(svg_text, req_width, req_height, x, y)
+
+    return _load_raster_bytes(data, req_width, req_height, x, y)
+
+
+def _render_mermaid_png(mermaid: str) -> bytes | ToolResult:
+    try:
+        response = httpx.post(
+            "https://kroki.io/mermaid/png",
+            content=mermaid.encode("utf-8"),
+            headers={"content-type": "text/plain; charset=utf-8"},
+            timeout=HTTP_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        return response.content
+    except Exception as first_error:
+        try:
+            encoded = base64.urlsafe_b64encode(mermaid.encode("utf-8")).decode("ascii")
+            response = httpx.get(
+                f"https://mermaid.ink/img/{encoded}",
+                timeout=HTTP_TIMEOUT_SEC,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            return response.content
+        except Exception as second_error:
+            return ToolResult(
+                content=f"Mermaidレンダリングエラー: {first_error} / {second_error}",
+                is_error=True,
+            )
+
+
+def _load_from_mermaid(
+    mermaid: str,
+    req_width: int | None,
+    req_height: int | None,
+    x: int,
+    y: int,
+) -> tuple[bytes, int, int] | ToolResult:
+    rendered = _render_mermaid_png(mermaid)
+    if isinstance(rendered, ToolResult):
+        return rendered
+    return _load_raster_bytes(rendered, req_width, req_height, x, y)
+
+
 class DisplayTextTool(ToolBase):
     name = "display_text"
     description = (
@@ -291,14 +486,30 @@ class DisplayImageTool(ToolBase):
     name = "display_image"
     description = (
         "M5StickS3のディスプレイに画像を表示します。"
-        "image_path または rgb565_base64 を指定してください。"
+        "image_path/image_url/svg/mermaid/rgb565_base64 のいずれか1つを指定してください。"
     )
     input_schema = {
         "type": "object",
         "properties": {
             "image_path": {
                 "type": "string",
-                "description": "表示するローカル画像ファイルのパス (PNG/JPEG等)",
+                "description": "表示するローカル画像ファイルのパス (PNG/JPEG/SVG等)",
+            },
+            "image_url": {
+                "type": "string",
+                "description": "表示する画像URL (http/https)。SVG URLも可。",
+            },
+            "url": {
+                "type": "string",
+                "description": "image_url のエイリアス。",
+            },
+            "svg": {
+                "type": "string",
+                "description": "SVG文字列をそのまま指定して表示します。",
+            },
+            "mermaid": {
+                "type": "string",
+                "description": "Mermaid構文を指定して図を表示します。",
             },
             "rgb565_base64": {
                 "type": "string",
@@ -309,13 +520,13 @@ class DisplayImageTool(ToolBase):
             },
             "width": {
                 "type": "integer",
-                "description": "画像幅 (1-135)。省略時は元画像サイズを使用。",
+                "description": "画像幅 (1-135)。省略時は元画像サイズ/比率を使用。",
                 "minimum": 1,
                 "maximum": 135,
             },
             "height": {
                 "type": "integer",
-                "description": "画像高 (1-240)。省略時は元画像サイズを使用。",
+                "description": "画像高 (1-240)。省略時は元画像サイズ/比率を使用。",
                 "minimum": 1,
                 "maximum": 240,
             },
@@ -366,62 +577,48 @@ class DisplayImageTool(ToolBase):
         x: int,
         y: int,
     ) -> tuple[bytes, int, int] | ToolResult:
-        if Image is None:
-            return ToolResult(
-                content="Pillow未インストールのため image_path は利用できません。",
-                is_error=True,
-            )
-
         path = Path(image_path).expanduser()
         if not path.is_absolute():
             path = Path.cwd() / path
         if not path.exists() or not path.is_file():
             return ToolResult(content=f"画像ファイルが見つかりません: {path}", is_error=True)
 
+        if path.suffix.lower() == ".svg":
+            try:
+                svg_text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                svg_text = path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                return ToolResult(content=f"SVG読み込みエラー: {e}", is_error=True)
+            return _load_svg_text(svg_text, req_width, req_height, x, y)
+
         try:
-            with Image.open(path) as img:
-                img = img.convert("RGB")
-                raw_w, raw_h = img.size
-
-                if req_width is not None and req_height is not None:
-                    width, height = req_width, req_height
-                elif req_width is not None:
-                    width = req_width
-                    height = max(1, int(round(raw_h * (req_width / raw_w))))
-                elif req_height is not None:
-                    height = req_height
-                    width = max(1, int(round(raw_w * (req_height / raw_h))))
-                else:
-                    width, height = raw_w, raw_h
-
-                max_w = SCREEN_WIDTH - x
-                max_h = SCREEN_HEIGHT - y
-                if width > max_w or height > max_h:
-                    width, height = _fit_size(width, height, max_w, max_h)
-
-                if width <= 0 or height <= 0:
-                    return ToolResult(
-                        content="描画可能な画像サイズを計算できませんでした。",
-                        is_error=True,
-                    )
-
-                if (width, height) != img.size:
-                    resampling = getattr(Image, "Resampling", Image)
-                    img = img.resize((width, height), resampling.LANCZOS)
-
-                rgb565 = _rgb888_to_rgb565_be(img.tobytes())
-                return rgb565, width, height
+            data = path.read_bytes()
         except Exception as e:
-            return ToolResult(content=f"画像読み込みエラー: {e}", is_error=True)
+            return ToolResult(content=f"画像ファイル読み込みエラー: {e}", is_error=True)
+        return _load_raster_bytes(data, req_width, req_height, x, y)
 
     async def execute(self, **kwargs) -> ToolResult:
         image_path = kwargs.get("image_path")
+        image_url = kwargs.get("image_url")
+        url_alias = kwargs.get("url")
+        svg = kwargs.get("svg")
+        mermaid = kwargs.get("mermaid")
         rgb565_base64 = kwargs.get("rgb565_base64")
+
         width = kwargs.get("width")
         height = kwargs.get("height")
         x = kwargs.get("x", 0)
         y = kwargs.get("y", 0)
         clear = kwargs.get("clear", False)
+
+        if (not image_url) and isinstance(url_alias, str) and url_alias.strip() != "":
+            image_url = url_alias
+
+        if isinstance(image_path, str) and image_path.lower().startswith(("http://", "https://")):
+            if not image_url:
+                image_url = image_path
+                image_path = None
 
         pos_err = self._validate_position(x, y)
         if pos_err:
@@ -437,20 +634,45 @@ class DisplayImageTool(ToolBase):
             return ToolResult(content="clear は true/false で指定してください。", is_error=True)
 
         has_path = isinstance(image_path, str) and image_path.strip() != ""
+        has_url = isinstance(image_url, str) and image_url.strip() != ""
+        has_svg = isinstance(svg, str) and svg.strip() != ""
+        has_mermaid = isinstance(mermaid, str) and mermaid.strip() != ""
         has_base64 = isinstance(rgb565_base64, str) and rgb565_base64 != ""
-        if not has_path and not has_base64:
+
+        source_count = sum((has_path, has_url, has_svg, has_mermaid, has_base64))
+        if source_count == 0:
             return ToolResult(
-                content="image_path か rgb565_base64 のいずれかを指定してください。",
+                content=(
+                    "image_path/image_url/svg/mermaid/rgb565_base64 のいずれか1つを指定してください。"
+                ),
                 is_error=True,
             )
-        if has_path and has_base64:
+        if source_count > 1:
             return ToolResult(
-                content="image_path と rgb565_base64 は同時に指定できません。",
+                content=(
+                    "入力ソースは1つだけ指定してください。"
+                    "(image_path, image_url, svg, mermaid, rgb565_base64 は排他的)"
+                ),
                 is_error=True,
             )
 
         if has_path:
             loaded = self._load_from_path(image_path, width, height, x, y)
+            if isinstance(loaded, ToolResult):
+                return loaded
+            rgb565, width, height = loaded
+        elif has_url:
+            loaded = _load_from_url(image_url, width, height, x, y)
+            if isinstance(loaded, ToolResult):
+                return loaded
+            rgb565, width, height = loaded
+        elif has_svg:
+            loaded = _load_svg_text(svg, width, height, x, y)
+            if isinstance(loaded, ToolResult):
+                return loaded
+            rgb565, width, height = loaded
+        elif has_mermaid:
+            loaded = _load_from_mermaid(mermaid, width, height, x, y)
             if isinstance(loaded, ToolResult):
                 return loaded
             rgb565, width, height = loaded

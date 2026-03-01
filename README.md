@@ -127,11 +127,14 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 
 ### ディスプレイ制御ツール
 - `display_text`: 画面にテキスト表示（日本語対応、`size`で文字サイズ1-4を指定）
-- `display_image`: 画像表示（`image_path` または `rgb565_base64`）
-  - `image_path` 指定時はサーバー側でRGB565へ変換して表示
+- `display_image`: 画像表示（`image_path` / `image_url` / `svg` / `mermaid` / `rgb565_base64`）
+  - `image_path` / `image_url` は PNG/JPEG/SVG を受け付けて表示
+  - `svg` はSVG文字列を直接渡して表示
+  - `mermaid` はMermaid構文を図にレンダリングして表示
 - RGB565は row-major / big-endian の生データ
 - サーバー側で複数ブロックに分割して送信されるため、全画面画像も表示可能
 - 日本語フォントを自動検出できない場合は `AICHATTER_DISPLAY_FONT` にフォントファイルパスを設定
+- SVGをローカル変換するため `resvg-py` が必要（`cd server && uv sync`）
 
 ## 動作確認
 

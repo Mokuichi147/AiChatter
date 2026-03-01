@@ -20,6 +20,7 @@ dependencies = [
     "sudachipy>=0.6.8",
     "sudachidict_core>=20240716",
     "rank_bm25>=0.2.2",
+    "resvg-py>=0.2.6",
 ]
 
 [build-system]
