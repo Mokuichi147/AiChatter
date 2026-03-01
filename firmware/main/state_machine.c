@@ -122,6 +122,11 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         case SM_STATE_IDLE:
             if (event == SM_EVENT_VAD_START) {
                 set_state(SM_STATE_LISTENING);
+            } else if (event == SM_EVENT_WS_TTS_CHUNK) {
+                /* 通知等でTTS受信 → 再生状態へ */
+                set_state(SM_STATE_SPEAKING);
+            } else if (event == SM_EVENT_WS_TTS_END) {
+                /* TTS空応答 → IDLEのまま */
             }
             break;
 
