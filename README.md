@@ -85,6 +85,8 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 | 0x12  | ESP32 → Server | バージイン割り込み  |
 | 0x02  | Server → ESP32 | TTS音声チャンク    |
 | 0x03  | Server → ESP32 | TTS終了            |
+| 0x20  | Server → ESP32 | テキスト表示       |
+| 0x21  | Server → ESP32 | 画像ブロック表示   |
 
 ヘッダー構造: `[type:1][seq:2][payload_len:4]` (ビッグエンディアン)
 
@@ -122,6 +124,14 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 | 青     | LISTENING  |
 | 黄     | PROCESSING |
 | 緑     | SPEAKING   |
+
+### ディスプレイ制御ツール
+- `display_text`: 画面にテキスト表示（日本語対応、`size`で文字サイズ1-4を指定）
+- `display_image`: 画像表示（`image_path` または `rgb565_base64`）
+  - `image_path` 指定時はサーバー側でRGB565へ変換して表示
+- RGB565は row-major / big-endian の生データ
+- サーバー側で複数ブロックに分割して送信されるため、全画面画像も表示可能
+- 日本語フォントを自動検出できない場合は `AICHATTER_DISPLAY_FONT` にフォントファイルパスを設定
 
 ## 動作確認
 

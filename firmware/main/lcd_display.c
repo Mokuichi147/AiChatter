@@ -1,6 +1,5 @@
 #include "lcd_display.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -36,25 +35,20 @@
 #define COLOR_YELLOW    0xFFE0
 #define COLOR_GREEN     0x07E0
 #define COLOR_WHITE     0xFFFF
-#define COLOR_RED       0xF800
 #define COLOR_GRAY      0x4208
 
-/* ログテキスト設定 */
+/* テキスト描画設定 */
 #define FONT_W          6    /* フォント幅(px) */
 #define FONT_H          8    /* フォント高さ(px) */
-#define LOG_COLS        (LCD_WIDTH  / FONT_W)   /* 1行の文字数: 22 */
-#define LOG_STATUS_H    10   /* 上部ステータスバー高さ(px) */
-#define LOG_ROWS        ((LCD_HEIGHT - LOG_STATUS_H) / FONT_H)  /* ログ行数: 28 */
+#define FONT_MAX_SCALE  4
+#define STATUS_COLS     (LCD_WIDTH / FONT_W)
+#define STATUS_BAR_H    10
 
 static spi_device_handle_t s_spi = NULL;
 static SemaphoreHandle_t   s_lcd_mutex = NULL;
 
-/* ログバッファ */
-static char  s_log_lines[LOG_ROWS][LOG_COLS + 1];
-static int   s_log_count = 0;   /* 総追加行数 */
-
 /* ステータスバー文字列 */
-static char s_status_str[LOG_COLS + 1] = "AiChatter";
+static char s_status_str[STATUS_COLS + 1] = "AiChatter";
 static uint16_t s_status_color = COLOR_BLACK;
 
 /* ========== 6x8 ビットマップフォント (ASCII 0x20-0x7E) ==========
@@ -255,45 +249,85 @@ static void lcd_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg) {
     lcd_data(buf, sizeof(buf));
 }
 
-/* 文字列を指定座標に描画 */
+static void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                          uint16_t color) {
+    if (w == 0 || h == 0) return;
+    if (x >= LCD_WIDTH || y >= LCD_HEIGHT) return;
+
+    if (x + w > LCD_WIDTH) w = LCD_WIDTH - x;
+    if (y + h > LCD_HEIGHT) h = LCD_HEIGHT - y;
+
+    lcd_set_window(x, y, x + w - 1, y + h - 1);
+
+    uint8_t hi = color >> 8;
+    uint8_t lo = color & 0xFF;
+    static uint8_t line_buf[LCD_WIDTH * 2];
+    for (uint16_t i = 0; i < w; i++) {
+        line_buf[i * 2] = hi;
+        line_buf[i * 2 + 1] = lo;
+    }
+
+    gpio_set_level(LCD_DC_GPIO, 1);
+    for (uint16_t row = 0; row < h; row++) {
+        spi_transaction_t t = {
+            .length = w * 16,
+            .tx_buffer = line_buf,
+            .flags = 0,
+        };
+        spi_device_polling_transmit(s_spi, &t);
+    }
+}
+
+/* 文字列を指定座標に描画 (右側は空白で埋める) */
 static void lcd_draw_string(int x, int y, const char *str, uint16_t fg, uint16_t bg) {
     while (*str && x + FONT_W <= LCD_WIDTH) {
         lcd_draw_char(x, y, *str++, fg, bg);
         x += FONT_W;
     }
-    /* 残り部分をbgで塗りつぶし */
     while (x + FONT_W <= LCD_WIDTH) {
         lcd_draw_char(x, y, ' ', fg, bg);
         x += FONT_W;
     }
 }
 
-/* ステータスバーを描画 (上部 LOG_STATUS_H px) */
-static void lcd_redraw_status(void) {
-    /* 短い行で埋める */
-    static char padded[LOG_COLS + 1];
-    snprintf(padded, sizeof(padded), "%-*s", LOG_COLS, s_status_str);
-    /* ステータスバーを塗りつぶしながら文字描画 */
-    for (int i = 0; i < LOG_COLS && i < (int)strlen(padded); i++) {
-        lcd_draw_char(i * FONT_W, 0, padded[i], COLOR_BLACK, s_status_color);
+/* 拡大文字描画 (size=1..4) */
+static void lcd_draw_char_scaled(int x, int y, char c, uint8_t size,
+                                 uint16_t fg, uint16_t bg) {
+    if (size <= 1) {
+        lcd_draw_char(x, y, c, fg, bg);
+        return;
     }
-}
+    if (size > FONT_MAX_SCALE) size = FONT_MAX_SCALE;
+    if (c < 0x20 || c > 0x7E) c = '?';
 
-/* ログ領域を全再描画 */
-static void lcd_redraw_log(void) {
-    int total = s_log_count < LOG_ROWS ? s_log_count : LOG_ROWS;
-    int start = s_log_count > LOG_ROWS ? (s_log_count % LOG_ROWS) : 0;
+    const uint8_t *glyph = FONT6x8[(uint8_t)c - 0x20];
+    const int dst_w = FONT_W * size;
+    const int dst_h = FONT_H * size;
+    static uint8_t buf[FONT_W * FONT_H * FONT_MAX_SCALE * FONT_MAX_SCALE * 2];
 
-    for (int row = 0; row < LOG_ROWS; row++) {
-        int y = LOG_STATUS_H + row * FONT_H;
-        if (row < total) {
-            int idx = (start + row) % LOG_ROWS;
-            lcd_draw_string(0, y, s_log_lines[idx], COLOR_WHITE, COLOR_BLACK);
-        } else {
-            /* 空行を黒で塗りつぶし */
-            lcd_draw_string(0, y, "", COLOR_WHITE, COLOR_BLACK);
+    int idx = 0;
+    for (int row = 0; row < FONT_H; row++) {
+        for (int dy = 0; dy < size; dy++) {
+            (void)dy;
+            for (int col = 0; col < FONT_W; col++) {
+                uint16_t color = (glyph[col] & (1 << row)) ? fg : bg;
+                for (int dx = 0; dx < size; dx++) {
+                    (void)dx;
+                    buf[idx++] = color >> 8;
+                    buf[idx++] = color & 0xFF;
+                }
+            }
         }
     }
+
+    lcd_set_window(x, y, x + dst_w - 1, y + dst_h - 1);
+    lcd_data(buf, (size_t)dst_w * (size_t)dst_h * 2);
+}
+
+/* ステータスバーを描画 (上部 STATUS_BAR_H px) */
+static void lcd_redraw_status(void) {
+    lcd_fill_rect(0, 0, LCD_WIDTH, STATUS_BAR_H, s_status_color);
+    lcd_draw_string(0, 1, s_status_str, COLOR_BLACK, s_status_color);
 }
 
 void lcd_init(void) {
@@ -370,8 +404,6 @@ void lcd_init(void) {
     ledc_channel_config(&ledc_channel);
 
     s_lcd_mutex = xSemaphoreCreateMutex();
-    memset(s_log_lines, 0, sizeof(s_log_lines));
-    s_log_count = 0;
 
     /* 画面全体を黒で初期化 */
     lcd_fill(COLOR_BLACK);
@@ -417,30 +449,76 @@ void lcd_set_state(lcd_state_t state) {
 
     if (s_lcd_mutex && xSemaphoreTake(s_lcd_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         s_status_color = color;
-        snprintf(s_status_str, sizeof(s_status_str), "%-*s", LOG_COLS, name);
+        snprintf(s_status_str, sizeof(s_status_str), "%-*s", STATUS_COLS, name);
         lcd_redraw_status();
         xSemaphoreGive(s_lcd_mutex);
     }
     ESP_LOGD(TAG, "LCD状態: %s", name);
 }
 
-void lcd_log(const char *fmt, ...) {
-    if (!s_lcd_mutex) return;
+void lcd_show_text(const char *text, uint8_t size, uint16_t x, uint16_t y, bool clear) {
+    if (!s_lcd_mutex || !text) return;
 
-    char line[LOG_COLS + 1];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(line, sizeof(line), fmt, args);
-    va_end(args);
+    if (size < 1) size = 1;
+    if (size > FONT_MAX_SCALE) size = FONT_MAX_SCALE;
 
-    /* ログバッファに追加 */
-    int idx = s_log_count % LOG_ROWS;
-    strncpy(s_log_lines[idx], line, LOG_COLS);
-    s_log_lines[idx][LOG_COLS] = '\0';
-    s_log_count++;
+    if (y < STATUS_BAR_H) y = STATUS_BAR_H;
+    if (x >= LCD_WIDTH || y >= LCD_HEIGHT) return;
 
-    if (xSemaphoreTake(s_lcd_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-        lcd_redraw_log();
+    const int char_w = FONT_W * size;
+    const int line_h = FONT_H * size + 1;
+    int cur_x = x;
+    int cur_y = y;
+
+    if (xSemaphoreTake(s_lcd_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+        if (clear) {
+            lcd_fill_rect(0, STATUS_BAR_H, LCD_WIDTH, LCD_HEIGHT - STATUS_BAR_H,
+                          COLOR_BLACK);
+        }
+
+        for (size_t i = 0; text[i] != '\0'; i++) {
+            char c = text[i];
+            if (c == '\r') continue;
+            if (c == '\n') {
+                cur_x = x;
+                cur_y += line_h;
+                if (cur_y + FONT_H * size > LCD_HEIGHT) break;
+                continue;
+            }
+
+            if (cur_x + char_w > LCD_WIDTH) {
+                cur_x = x;
+                cur_y += line_h;
+            }
+            if (cur_y + FONT_H * size > LCD_HEIGHT) break;
+
+            lcd_draw_char_scaled(cur_x, cur_y, c, size, COLOR_WHITE, COLOR_BLACK);
+            cur_x += char_w;
+        }
+
+        lcd_redraw_status();
+        xSemaphoreGive(s_lcd_mutex);
+    }
+}
+
+void lcd_draw_rgb565(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
+                     const uint8_t *data, size_t data_len) {
+    if (!s_lcd_mutex || !data) return;
+    if (width == 0 || height == 0) return;
+    if (x >= LCD_WIDTH || y >= LCD_HEIGHT) return;
+    if (x + width > LCD_WIDTH || y + height > LCD_HEIGHT) return;
+
+    size_t expected = (size_t)width * (size_t)height * 2;
+    if (data_len < expected) {
+        ESP_LOGW(TAG, "画像データ不足: expected=%u actual=%u",
+                 (unsigned)expected, (unsigned)data_len);
+        return;
+    }
+
+    if (xSemaphoreTake(s_lcd_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+        lcd_set_window(x, y, x + width - 1, y + height - 1);
+        lcd_data(data, expected);
+        lcd_redraw_status();
         xSemaphoreGive(s_lcd_mutex);
     }
 }

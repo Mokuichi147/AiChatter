@@ -8,12 +8,24 @@
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lcd_display.h"
 #include "state_machine.h"
 
 #define TAG "WS_CLIENT"
 #define HEADER_SIZE 7  // [type:1][seq_hi:1][seq_lo:1][len:4]
 #define RECONNECT_CHECK_INTERVAL_MS  5000  /* 接続監視間隔 */
 #define RECONNECT_FORCE_AFTER_MS    15000  /* この期間未接続なら強制再接続 */
+
+/* Server -> ESP32 メッセージ */
+#define MSG_TTS_CHUNK            0x02
+#define MSG_TTS_END              0x03
+#define MSG_SLEEP                0x04
+#define MSG_WAKE                 0x05
+#define MSG_DISPLAY_TEXT         0x20
+#define MSG_DISPLAY_IMAGE_BLOCK  0x21
+
+#define DISPLAY_TEXT_META_SIZE   6
+#define DISPLAY_IMAGE_META_SIZE  8
 
 static esp_websocket_client_handle_t s_client = NULL;
 static tts_audio_callback_t s_tts_cb = NULL;
@@ -23,7 +35,7 @@ static uint8_t s_current_msg_type = 0;  /* フレーム分割配信時のメッ�
 static volatile bool s_started = false;  /* クライアント起動済みフラグ */
 
 /* フレーム再組立バッファ (分割配信対策) */
-#define REASSEMBLY_BUF_SIZE  (4096 + HEADER_SIZE)
+#define REASSEMBLY_BUF_SIZE  8192
 static uint8_t s_reassembly_buf[REASSEMBLY_BUF_SIZE];
 static size_t  s_reassembly_len = 0;
 static size_t  s_reassembly_expected = 0;  /* ヘッダから読んだペイロード長 */
@@ -38,6 +50,74 @@ static void make_header(uint8_t *buf, uint8_t type, uint16_t seq,
     buf[4] = (payload_len >> 16) & 0xFF;
     buf[5] = (payload_len >> 8) & 0xFF;
     buf[6] = payload_len & 0xFF;
+}
+
+static uint16_t read_u16_be(const uint8_t *p) {
+    return ((uint16_t)p[0] << 8) | p[1];
+}
+
+static void reset_reassembly(void) {
+    s_current_msg_type = 0;
+    s_reassembly_len = 0;
+    s_reassembly_expected = 0;
+}
+
+static void handle_display_text(const uint8_t *payload, size_t len) {
+    if (len < DISPLAY_TEXT_META_SIZE) {
+        ESP_LOGW(TAG, "MSG_DISPLAY_TEXTのペイロードが短すぎます: %u",
+                 (unsigned)len);
+        return;
+    }
+
+    uint8_t size = payload[0];
+    bool clear = payload[1] != 0;
+    uint16_t x = read_u16_be(payload + 2);
+    uint16_t y = read_u16_be(payload + 4);
+
+    size_t text_len = len - DISPLAY_TEXT_META_SIZE;
+    if (text_len > 512) text_len = 512;
+
+    char text[513];
+    memcpy(text, payload + DISPLAY_TEXT_META_SIZE, text_len);
+    text[text_len] = '\0';
+
+    lcd_show_text(text, size, x, y, clear);
+}
+
+static void handle_display_image_block(const uint8_t *payload, size_t len) {
+    if (len < DISPLAY_IMAGE_META_SIZE) {
+        ESP_LOGW(TAG, "MSG_DISPLAY_IMAGE_BLOCKのペイロードが短すぎます: %u",
+                 (unsigned)len);
+        return;
+    }
+
+    uint16_t x = read_u16_be(payload + 0);
+    uint16_t y = read_u16_be(payload + 2);
+    uint16_t w = read_u16_be(payload + 4);
+    uint16_t h = read_u16_be(payload + 6);
+
+    const uint8_t *img = payload + DISPLAY_IMAGE_META_SIZE;
+    size_t img_len = len - DISPLAY_IMAGE_META_SIZE;
+    lcd_draw_rgb565(x, y, w, h, img, img_len);
+}
+
+static void handle_payload_message(uint8_t msg_type, const uint8_t *payload,
+                                   size_t payload_len) {
+    switch (msg_type) {
+        case MSG_TTS_CHUNK:
+            if (s_tts_cb && payload_len > 0) {
+                s_tts_cb(payload, payload_len);
+            }
+            break;
+        case MSG_DISPLAY_TEXT:
+            handle_display_text(payload, payload_len);
+            break;
+        case MSG_DISPLAY_IMAGE_BLOCK:
+            handle_display_image_block(payload, payload_len);
+            break;
+        default:
+            break;
+    }
 }
 
 static void ws_event_handler(void *handler_args, esp_event_base_t base,
@@ -78,8 +158,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
 
                 if (data->payload_offset == 0) {
                     /* 新しいフレーム開始 */
-                    s_reassembly_len = 0;
-                    s_reassembly_expected = 0;
+                    reset_reassembly();
 
                     if (len < HEADER_SIZE) break;
 
@@ -90,28 +169,42 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
                                            ((uint32_t)buf[4] << 16) |
                                            ((uint32_t)buf[5] << 8) | buf[6];
 
-                    if (msg_type == 0x03) {
+                    if (msg_type == MSG_TTS_END) {
                         /* TTS終了 (ペイロードなし) */
                         audio_hal_notify_tts_end();
                         if (s_end_cb) s_end_cb();
+                        reset_reassembly();
                         break;
                     }
 
-                    if (msg_type == 0x04) {
+                    if (msg_type == MSG_SLEEP) {
                         /* スリープ指示 */
                         ESP_LOGI(TAG, "MSG_SLEEP受信");
                         state_machine_post_event(SM_EVENT_SLEEP, NULL, 0);
+                        reset_reassembly();
                         break;
                     }
 
-                    if (msg_type == 0x05) {
+                    if (msg_type == MSG_WAKE) {
                         /* ウェイク指示 */
                         ESP_LOGI(TAG, "MSG_WAKE受信");
                         state_machine_post_event(SM_EVENT_WAKE, NULL, 0);
+                        reset_reassembly();
                         break;
                     }
 
-                    if (msg_type != 0x02) break;
+                    if (msg_type != MSG_TTS_CHUNK &&
+                        msg_type != MSG_DISPLAY_TEXT &&
+                        msg_type != MSG_DISPLAY_IMAGE_BLOCK) {
+                        break;
+                    }
+
+                    if (payload_len > REASSEMBLY_BUF_SIZE) {
+                        ESP_LOGW(TAG, "受信ペイロードが大きすぎます: type=0x%02X len=%u",
+                                 msg_type, (unsigned)payload_len);
+                        reset_reassembly();
+                        break;
+                    }
 
                     /* ペイロードを再組立バッファにコピー */
                     size_t avail = len - HEADER_SIZE;
@@ -123,15 +216,13 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
 
                     /* フレームが1イベントで完結した場合は即送信 */
                     if (s_reassembly_len >= s_reassembly_expected) {
-                        if (s_tts_cb && s_reassembly_len > 0) {
-                            s_tts_cb(s_reassembly_buf, s_reassembly_len);
-                        }
-                        s_reassembly_len = 0;
-                        s_reassembly_expected = 0;
+                        handle_payload_message(s_current_msg_type, s_reassembly_buf,
+                                               s_reassembly_len);
+                        reset_reassembly();
                     }
                 } else {
                     /* 分割フレームの続き */
-                    if (s_current_msg_type != 0x02 || s_reassembly_expected == 0) break;
+                    if (s_reassembly_expected == 0) break;
 
                     size_t remain = REASSEMBLY_BUF_SIZE - s_reassembly_len;
                     size_t copy = len;
@@ -141,11 +232,9 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
 
                     /* 全データ受信完了 */
                     if (s_reassembly_len >= s_reassembly_expected) {
-                        if (s_tts_cb && s_reassembly_len > 0) {
-                            s_tts_cb(s_reassembly_buf, s_reassembly_len);
-                        }
-                        s_reassembly_len = 0;
-                        s_reassembly_expected = 0;
+                        handle_payload_message(s_current_msg_type, s_reassembly_buf,
+                                               s_reassembly_len);
+                        reset_reassembly();
                     }
                 }
             }

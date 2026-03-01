@@ -129,6 +129,7 @@ async def startup_event() -> None:
                 DeleteNotificationTool,
             )
             from tools.sleep_control import SetSleepTool
+            from tools.display_control import DisplayTextTool, DisplayImageTool
 
             _tool_registry = ToolRegistry()
             _memory_store = MemoryStore(character_data_path("memory.json"))
@@ -144,6 +145,8 @@ async def startup_event() -> None:
             _tool_registry.register(ListNotificationsTool(_notification_store))
             _tool_registry.register(DeleteNotificationTool(_notification_store))
             _tool_registry.register(SetSleepTool(lambda: _active_pipelines))
+            _tool_registry.register(DisplayTextTool(lambda: _active_pipelines))
+            _tool_registry.register(DisplayImageTool(lambda: _active_pipelines))
 
             if settings.subagent_enabled:
                 from subagent.job_manager import SubAgentJobManager

@@ -47,7 +47,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "IPアドレス取得: " IPSTR, IP2STR(&event->ip_info.ip));
-        lcd_log("IP:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -258,23 +257,17 @@ void app_main(void) {
     state_machine_init();
 
     /* WiFi接続 */
-    lcd_log("WiFi: %s", WIFI_SSID);
     if (!wifi_connect()) {
         ESP_LOGE(TAG, "WiFi接続失敗");
-        lcd_log("WiFi FAIL!");
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
-    lcd_log("WiFi OK");
 
     /* 音声HAL初期化 */
-    lcd_log("Audio init...");
     audio_hal_init(audio_rx_callback, vad_event_callback);
-    lcd_log("Audio OK");
 
     /* WebSocketクライアント初期化 */
-    lcd_log("WS->%s", WS_SERVER_URI + 5);  /* "ws://" を省略 */
     ws_client_init(WS_SERVER_URI, tts_audio_callback, tts_end_callback);
 
     /* ボタンタスク起動 */
@@ -282,7 +275,6 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "AiChatter 起動完了 - 話しかけてください");
     ESP_LOGI(TAG, "サーバー: %s", WS_SERVER_URI);
-    lcd_log("Ready!");
 
     /* メインループ: ウォッチドッグ用にスリープ */
     while (true) {

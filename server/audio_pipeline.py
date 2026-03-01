@@ -23,10 +23,13 @@ MSG_TTS_CHUNK = 0x02
 MSG_TTS_END = 0x03
 MSG_SLEEP = 0x04
 MSG_WAKE = 0x05
+MSG_DISPLAY_TEXT = 0x20
+MSG_DISPLAY_IMAGE_BLOCK = 0x21
 
 HEADER_SIZE = 7  # [type:1][seq:2][payload_len:4]
 MAX_TOOL_ROUNDS = 5
 MAX_CHUNK = 4096
+DISPLAY_IMAGE_META_SIZE = 8
 
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
@@ -209,6 +212,10 @@ class AudioPipeline:
                 "先にlist_notificationsでIDを確認してください。\n"
                 "- set_sleep: デバイスをスリープさせます。「おやすみ」等の"
                 "就寝の挨拶を受けたら積極的に使ってください。\n"
+                "- display_text: M5StickS3の画面にテキストを表示します。"
+                "短いメモや進行状況の提示に使ってください。\n"
+                "- display_image: M5StickS3の画面にRGB565画像を表示します。"
+                "画像データが用意されている場合に使ってください。\n"
                 "- run_subagent_research: 時間がかかる調査をバックグラウンドで開始します。"
                 "Web検索やメモリ検索を複数回行う詳細調査に使います。\n"
                 "- list_subagent_jobs: サブエージェントジョブの進捗を確認します。\n"
@@ -393,6 +400,71 @@ class AudioPipeline:
         if await self._safe_send(header):
             self._device_sleeping = False
             logger.info("MSG_WAKE送信")
+
+    async def send_display_text(
+        self,
+        text: str,
+        size: int = 1,
+        x: int = 0,
+        y: int = 10,
+        clear: bool = True,
+    ) -> None:
+        """デバイス画面にテキストを表示する。"""
+        if text is None:
+            text = ""
+        size = max(1, min(4, int(size)))
+        x = max(0, min(134, int(x)))
+        y = max(0, min(239, int(y)))
+
+        text_bytes = text.encode("utf-8")
+        if len(text_bytes) > 512:
+            text_bytes = text_bytes[:512]
+
+        payload = struct.pack(">BBHH", size, 1 if clear else 0, x, y) + text_bytes
+        header = make_header(MSG_DISPLAY_TEXT, self._next_seq(), len(payload))
+        await self._safe_send(header + payload)
+        logger.info(f"MSG_DISPLAY_TEXT送信 size={size} x={x} y={y} clear={clear}")
+
+    async def send_display_image(
+        self, rgb565: bytes, width: int, height: int, x: int = 0, y: int = 0
+    ) -> None:
+        """RGB565画像を複数ブロックに分割して送信する。"""
+        width = int(width)
+        height = int(height)
+        x = int(x)
+        y = int(y)
+
+        if width <= 0 or height <= 0:
+            raise ValueError("width/height は1以上で指定してください。")
+        if x < 0 or y < 0 or x + width > 135 or y + height > 240:
+            raise ValueError("描画領域が画面範囲外です。")
+
+        expected = width * height * 2
+        if len(rgb565) != expected:
+            raise ValueError(
+                f"RGB565データ長が不正です。expected={expected}, actual={len(rgb565)}"
+            )
+
+        bytes_per_row = width * 2
+        max_rows = (MAX_CHUNK - DISPLAY_IMAGE_META_SIZE) // bytes_per_row
+        if max_rows < 1:
+            raise ValueError("画像の横幅が大きすぎて送信できません。")
+
+        for row in range(0, height, max_rows):
+            block_rows = min(max_rows, height - row)
+            begin = row * bytes_per_row
+            end = begin + block_rows * bytes_per_row
+            block = rgb565[begin:end]
+            payload = (
+                struct.pack(">HHHH", x, y + row, width, block_rows) + block
+            )
+            header = make_header(
+                MSG_DISPLAY_IMAGE_BLOCK, self._next_seq(), len(payload)
+            )
+            if not await self._safe_send(header + payload):
+                return
+
+        logger.info(f"MSG_DISPLAY_IMAGE_BLOCK送信 width={width} height={height} x={x} y={y}")
 
     async def process_button_press(self) -> None:
         """ボタン押下をLLMに伝えて応答を生成する。"""
