@@ -3,6 +3,7 @@ import logging
 import re
 from collections import OrderedDict
 
+from config import prompt_config
 from subagent.models import SubAgentJobRequest, SubAgentJobResult
 from subagent.tool_adapter import SubAgentToolAdapter
 from subagent_llm import SubAgentLLM
@@ -29,14 +30,7 @@ class SubAgentRunner:
 
     @staticmethod
     def _build_system_prompt() -> str:
-        return (
-            "あなたは調査専用のサブエージェントです。"
-            "目的達成のために必要なら複数回ツールを使ってください。"
-            "最終出力は必ずJSONオブジェクトのみで返します。"
-            "JSONのキーは answer, findings, evidence, limitations の4つです。"
-            "findings/evidence/limitations は文字列配列にしてください。"
-            "Markdownや前置き文章は出力しないでください。"
-        )
+        return prompt_config.subagent_system_prompt.strip()
 
     @staticmethod
     def _build_user_prompt(req: SubAgentJobRequest) -> str:

@@ -82,6 +82,35 @@ def load_character(yaml_path: str) -> CharacterConfig:
     return config
 
 
+@dataclass
+class PromptConfig:
+    output_rules: str = ""
+    tool_guide: str = ""
+    subagent_system_prompt: str = ""
+
+
+def load_prompt(yaml_path: str) -> PromptConfig:
+    """YAMLファイルからプロンプト設定を読み込む。"""
+    path = Path(yaml_path)
+    if not path.is_absolute():
+        path = Path(__file__).parent / path
+
+    if not path.exists():
+        logger.warning(f"プロンプト設定ファイルが見つかりません: {path}")
+        return PromptConfig()
+
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    config = PromptConfig(
+        output_rules=data.get("output_rules", ""),
+        tool_guide=data.get("tool_guide", ""),
+        subagent_system_prompt=data.get("subagent_system_prompt", ""),
+    )
+    logger.info(f"プロンプト設定読み込み完了: {path}")
+    return config
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -101,6 +130,9 @@ class Settings(BaseSettings):
 
     # キャラクター設定ファイル
     character_file: str = "character.yaml"
+
+    # プロンプト設定ファイル
+    prompt_file: str = "prompt.yaml"
 
     # ツール設定
     tools_enabled: bool = True
@@ -127,6 +159,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 character = load_character(settings.character_file)
+prompt_config = load_prompt(settings.prompt_file)
 
 
 def character_data_path(filename: str) -> str:

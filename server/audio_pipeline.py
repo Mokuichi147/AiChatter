@@ -9,7 +9,7 @@ from typing import Awaitable, Callable, Optional
 from local_asr import LocalASR
 from local_llm import LocalLLM, TextChunk, ToolCallRequest
 from local_tts import LocalTTS
-from config import character, character_data_path, settings
+from config import character, character_data_path, prompt_config, settings
 
 logger = logging.getLogger(__name__)
 
@@ -197,11 +197,9 @@ class AudioPipeline:
         """システムプロンプトを組み立てる。"""
         system_prompt = character.persona.system_prompt or settings.system_prompt
 
-        # コンテキスト変数を展開
-        now = datetime.now()
-        system_prompt = system_prompt.replace(
-            "{{DATETIME}}", now.strftime("%Y年%m月%d日 %H:%M")
-        )
+        # 共通フォーマット指示を追加
+        if prompt_config.output_rules:
+            system_prompt += "\n\n" + prompt_config.output_rules.strip()
 
         # ツール有効時はツール使用ガイドを追加
         if (
@@ -209,39 +207,16 @@ class AudioPipeline:
             and not self.tool_registry.is_empty
             and settings.tools_enabled
         ):
-            system_prompt += (
-                "\n\n## ツール使用ガイド\n"
-                "あなたは以下のツールを使えます。積極的に活用してください。\n"
-                "- save_memory: ユーザーの好み・名前・重要な事実・約束事など、"
-                "後で役立ちそうな情報は自主的にメモしてください。"
-                "明示的に「覚えて」と言われなくても構いません。\n"
-                "- search_memory: ユーザーの発言に関連する記憶がありそうなとき、"
-                "まず検索して過去の情報を活用してください。"
-                "日付(after/before)で絞り込みもできます。\n"
-                "- delete_memory: 不要な記憶を削除します。"
-                "先にsearch_memoryでキーを確認してください。\n"
-                "- set_volume: 音量調整を頼まれたときに使います。\n"
-                "- set_notification: ユーザーが通知やリマインダーを頼んだときに使います。"
-                "定期通知はrepeatで指定: 'every:30m'(30分毎), 'every:2h'(2時間毎), "
-                "'cron:08:00'(毎日8時), 'cron:07:30:weekdays'(平日), 'cron:09:00:mon,fri'(曜日指定)。\n"
-                "- list_notifications: 予約済みの通知一覧を確認します。\n"
-                "- delete_notification: 通知をキャンセルしたいときに使います。"
-                "先にlist_notificationsでIDを確認してください。\n"
-                "- set_sleep: デバイスをスリープさせます。「おやすみ」等の"
-                "就寝の挨拶を受けたら積極的に使ってください。\n"
-                "- display_text: M5StickS3の画面にテキストを表示します。"
-                "短いメモや進行状況の提示に使ってください。\n"
-                "- display_image: M5StickS3の画面に画像を表示します。"
-                "image_path / image_url / svg / mermaid / rgb565_base64 に対応します。\n"
-                "- run_subagent_research: 時間がかかる調査をバックグラウンドで開始します。"
-                "Web検索やメモリ検索を複数回行う詳細調査に使います。\n"
-                "- list_subagent_jobs: サブエージェントジョブの進捗を確認します。\n"
-                "- get_subagent_job: 完了ジョブの結果を取得します。"
-                "結果をユーザーに伝えるかどうかは、会話文脈を見てあなたが判断してください。\n"
-            )
+            system_prompt += "\n\n" + prompt_config.tool_guide.strip()
 
         if extra_instruction:
             system_prompt += "\n\n" + extra_instruction
+
+        # コンテキスト変数を展開（全セクション結合後に一括置換）
+        now = datetime.now()
+        system_prompt = system_prompt.replace(
+            "{{DATETIME}}", now.strftime("%Y年%m月%d日 %H:%M")
+        )
 
         return system_prompt
 

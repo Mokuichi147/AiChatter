@@ -28,6 +28,9 @@ server/data/
 # キャラクター設定（ユーザーカスタマイズ用）
 server/character.yaml
 
+# プロンプト設定（ユーザーカスタマイズ用）
+server/prompt.yaml
+
 # OS
 .DS_Store
 Thumbs.db
