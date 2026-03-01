@@ -118,7 +118,9 @@ class Settings(BaseSettings):
 
     # LLM (LiteLLM)
     llm_model: str = "ollama_chat/glm-5:cloud"
+    llm_reasoning: str = ""
     llm_sub_model: str = ""
+    llm_sub_reasoning: str = ""
 
     # ASR (mlx-audio Qwen3-ASR)
     asr_model: str = "mlx-community/Qwen3-ASR-0.6B-8bit"

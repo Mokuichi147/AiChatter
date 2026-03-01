@@ -60,14 +60,28 @@ class LocalLLM:
                 pos = end + len(_CLOSE)
                 in_think = False
             else:
+                # <think> と </think>(迷子) の両方を探す
                 start = text.find(_OPEN, pos)
+                stray_close = text.find(_CLOSE, pos)
+
+                # 迷子の </think> が先に見つかった場合（<think>なしで閉じタグだけ来るケース）
+                if stray_close != -1 and (start == -1 or stray_close < start):
+                    result.append(text[pos:stray_close])
+                    pos = stray_close + len(_CLOSE)
+                    continue
+
                 if start == -1:
-                    # 末尾が <think> の部分一致なら pending へ
+                    # 末尾が <think> または </think> の部分一致なら pending へ
                     remaining = text[pos:]
-                    for i in range(min(len(_OPEN) - 1, len(remaining)), 0, -1):
-                        if remaining[-i:] == _OPEN[:i]:
-                            result.append(remaining[:-i])
-                            return "".join(result), False, remaining[-i:]
+                    best_len = 0
+                    for tag in (_OPEN, _CLOSE):
+                        for i in range(min(len(tag) - 1, len(remaining)), 0, -1):
+                            if remaining[-i:] == tag[:i] and i > best_len:
+                                best_len = i
+                                break
+                    if best_len:
+                        result.append(remaining[:-best_len])
+                        return "".join(result), False, remaining[-best_len:]
                     result.append(remaining)
                     return "".join(result), False, ""
                 result.append(text[pos:start])
@@ -121,6 +135,9 @@ class LocalLLM:
             "temperature": 0.7,
             "max_tokens": 512,
         }
+        if settings.llm_reasoning:
+            kwargs["reasoning_effort"] = settings.llm_reasoning
+            kwargs["drop_params"] = True
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

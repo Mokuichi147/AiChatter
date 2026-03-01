@@ -55,6 +55,9 @@ class SubAgentLLM:
             "max_tokens": 1200,
             "num_ctx": settings.subagent_num_ctx,
         }
+        if settings.llm_sub_reasoning:
+            kwargs["reasoning_effort"] = settings.llm_sub_reasoning
+            kwargs["drop_params"] = True
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
