@@ -127,3 +127,11 @@ class Settings(BaseSettings):
 
 settings = Settings()
 character = load_character(settings.character_file)
+
+
+def character_data_path(filename: str) -> str:
+    """キャラクター名ベースのデータファイルパスを返す。"""
+    name = character.persona.name
+    if name:
+        return f"data/{name}/{filename}"
+    return f"data/{filename}"

@@ -6,7 +6,7 @@ import struct
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from config import settings
+from config import settings, character_data_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,7 +131,7 @@ async def startup_event() -> None:
             from tools.sleep_control import SetSleepTool
 
             _tool_registry = ToolRegistry()
-            _memory_store = MemoryStore(settings.memory_file)
+            _memory_store = MemoryStore(character_data_path("memory.json"))
             memory_store = _memory_store
             _tool_registry.register(SaveMemoryTool(memory_store))
             _tool_registry.register(SearchMemoryTool(memory_store))

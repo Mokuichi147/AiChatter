@@ -9,7 +9,7 @@ from typing import Awaitable, Callable, Optional
 from local_asr import LocalASR
 from local_llm import LocalLLM, TextChunk, ToolCallRequest
 from local_tts import LocalTTS
-from config import character, settings
+from config import character, character_data_path, settings
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class AudioPipeline:
 
     @staticmethod
     def _history_path() -> Path:
-        path = Path(settings.history_file)
+        path = Path(character_data_path("history.json"))
         if not path.is_absolute():
             path = Path(__file__).parent / path
         return path
