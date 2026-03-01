@@ -152,7 +152,10 @@ async def startup_event() -> None:
             from tools.display_control import DisplayTextTool, DisplayImageTool
 
             _tool_registry = ToolRegistry()
-            _memory_store = MemoryStore(character_data_path("memory.json"))
+            _memory_store = MemoryStore(
+                character_data_path("memory.json"),
+                history_file=character_data_path("history.json"),
+            )
             memory_store = _memory_store
             _tool_registry.register(SaveMemoryTool(memory_store))
             _tool_registry.register(SearchMemoryTool(memory_store))

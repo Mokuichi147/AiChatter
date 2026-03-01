@@ -14,10 +14,16 @@ _STOP_POS = {"助詞", "助動詞", "記号", "空白", "補助記号"}
 
 
 class MemoryStore:
-    def __init__(self, file_path: str) -> None:
+    def __init__(self, file_path: str, history_file: str = "") -> None:
         self._path = Path(file_path)
         if not self._path.is_absolute():
             self._path = Path(__file__).parent.parent / self._path
+        self._history_path: Path | None = None
+        if history_file:
+            hp = Path(history_file)
+            if not hp.is_absolute():
+                hp = Path(__file__).parent.parent / hp
+            self._history_path = hp
         self._data: dict[str, dict] = {}
         self._load()
 
@@ -62,6 +68,51 @@ class MemoryStore:
             if m.part_of_speech()[0] not in _STOP_POS
         ]
 
+    def _load_history_entries(
+        self, after_dt: datetime | None, before_dt: datetime | None,
+    ) -> list[tuple[str, dict]]:
+        """history.jsonからuser/assistantペアを読み込み、候補として返す。"""
+        if not self._history_path or not self._history_path.exists():
+            return []
+        try:
+            entries: list[dict] = json.loads(
+                self._history_path.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"history.json読み込み失敗: {e}")
+            return []
+
+        candidates: list[tuple[str, dict]] = []
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            # user + assistant のペアを結合
+            if entry.get("role") == "user" and i + 1 < len(entries) and entries[i + 1].get("role") == "assistant":
+                user_entry = entry
+                asst_entry = entries[i + 1]
+                created_at = user_entry.get("created_at", "")
+                content = f"ユーザー: {user_entry.get('content', '')}\nアシスタント: {asst_entry.get('content', '')}"
+                i += 2
+            else:
+                created_at = entry.get("created_at", "")
+                content = f"{entry.get('role', '')}: {entry.get('content', '')}"
+                i += 1
+
+            # 日付フィルタ
+            if (after_dt or before_dt) and created_at:
+                try:
+                    entry_dt = datetime.strptime(created_at[:10], "%Y-%m-%d")
+                except ValueError:
+                    continue
+                if after_dt and entry_dt < after_dt:
+                    continue
+                if before_dt and entry_dt > before_dt:
+                    continue
+
+            key = f"history_{created_at.replace(' ', '_').replace(':', '')}"
+            candidates.append((key, {"content": content, "created_at": created_at}))
+        return candidates
+
     def search(
         self, query: str, after: str = "", before: str = "", include_auto: bool = True,
     ) -> list[dict]:
@@ -78,10 +129,10 @@ class MemoryStore:
             except ValueError:
                 pass
 
-        # 日付・autoフィルタで候補を絞る
+        # memory.jsonから候補を絞る（auto=Trueのエントリは除外）
         candidates: list[tuple[str, dict]] = []
         for key, entry in self._data.items():
-            if not include_auto and entry.get("auto", False):
+            if entry.get("auto", False):
                 continue
             created_at = entry.get("created_at", "")
             if (after_dt or before_dt) and created_at:
@@ -94,6 +145,10 @@ class MemoryStore:
                 if before_dt and entry_dt > before_dt:
                     continue
             candidates.append((key, entry))
+
+        # include_autoの場合、history.jsonの会話履歴も検索対象に追加
+        if include_auto:
+            candidates.extend(self._load_history_entries(after_dt, before_dt))
 
         if not candidates:
             return []

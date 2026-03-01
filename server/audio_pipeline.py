@@ -347,12 +347,6 @@ class AudioPipeline:
                     self._history = self._history[-20:]
                 self._save_history([user_entry, assistant_entry])
 
-                # メモリストアにも会話を自動記録
-                if self.memory_store:
-                    key = f"conv_{now_str.replace(' ', '_').replace(':', '')}"
-                    content = f"ユーザー: {user_text}\nアシスタント: {full_response}"
-                    self.memory_store.save(key, content, auto=True)
-
     async def _run_pipeline(self, audio_data: bytes) -> None:
         tts_end_sent = False
         try:
