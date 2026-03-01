@@ -31,4 +31,4 @@ class SetSleepTool(ToolBase):
                 return ToolResult(content=f"スリープ送信エラー: {e}", is_error=True)
 
         logger.info("デバイスをスリープモードに設定")
-        return ToolResult(content="デバイスをスリープモードにしました。")
+        return ToolResult(content="スリープを有効化しました。再度呼び出す必要はありません。")
