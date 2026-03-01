@@ -65,6 +65,21 @@ def _rgb888_to_rgb565_be(rgb888: bytes) -> bytes:
     return bytes(out)
 
 
+def _rgb565_be_to_rgb888(rgb565: bytes) -> bytes:
+    out = bytearray((len(rgb565) // 2) * 3)
+    j = 0
+    for i in range(0, len(rgb565), 2):
+        pixel = (rgb565[i] << 8) | rgb565[i + 1]
+        r = (pixel >> 8) & 0xF8
+        g = (pixel >> 3) & 0xFC
+        b = (pixel << 3) & 0xF8
+        out[j] = r
+        out[j + 1] = g
+        out[j + 2] = b
+        j += 3
+    return bytes(out)
+
+
 def _fit_size(raw_w: int, raw_h: int, max_w: int, max_h: int) -> tuple[int, int]:
     if raw_w <= 0 or raw_h <= 0 or max_w <= 0 or max_h <= 0:
         return 0, 0
@@ -429,13 +444,11 @@ class DisplayTextTool(ToolBase):
         clear = kwargs.get("clear", True)
 
         if not isinstance(size, int) or size < 1 or size > 4:
-            return ToolResult(content="size は1-4の整数で指定してください。", is_error=True)
-        if not isinstance(x, int) or x < 0 or x >= SCREEN_WIDTH:
-            return ToolResult(content="x は0-134の整数で指定してください。", is_error=True)
-        if not isinstance(y, int) or y < 0 or y >= SCREEN_HEIGHT:
-            return ToolResult(content="y は0-239の整数で指定してください。", is_error=True)
+            size = max(1, min(4, int(size) if isinstance(size, (int, float)) else 1))
+        x = max(0, min(int(x) if isinstance(x, (int, float)) else 0, SCREEN_WIDTH - 1))
+        y = max(0, min(int(y) if isinstance(y, (int, float)) else STATUS_BAR_Y, SCREEN_HEIGHT - 1))
         if not isinstance(clear, bool):
-            return ToolResult(content="clear は true/false で指定してください。", is_error=True)
+            clear = bool(clear)
 
         pipelines = self._get_pipelines()
         if not pipelines:
@@ -553,22 +566,6 @@ class DisplayImageTool(ToolBase):
     def __init__(self, get_pipelines: Callable) -> None:
         self._get_pipelines = get_pipelines
 
-    @staticmethod
-    def _validate_position(x: int, y: int) -> str | None:
-        if not isinstance(x, int) or x < 0 or x >= SCREEN_WIDTH:
-            return "x は0-134の整数で指定してください。"
-        if not isinstance(y, int) or y < 0 or y >= SCREEN_HEIGHT:
-            return "y は0-239の整数で指定してください。"
-        return None
-
-    @staticmethod
-    def _validate_dimension(name: str, value: int | None, limit: int) -> str | None:
-        if value is None:
-            return None
-        if not isinstance(value, int) or value < 1 or value > limit:
-            return f"{name} は1-{limit}の整数で指定してください。"
-        return None
-
     def _load_from_path(
         self,
         image_path: str,
@@ -620,16 +617,15 @@ class DisplayImageTool(ToolBase):
                 image_url = image_path
                 image_path = None
 
-        pos_err = self._validate_position(x, y)
-        if pos_err:
-            return ToolResult(content=pos_err, is_error=True)
+        # x/y座標を画面内にクランプ
+        x = min(max(int(x) if isinstance(x, (int, float)) else 0, 0), SCREEN_WIDTH - 1)
+        y = min(max(int(y) if isinstance(y, (int, float)) else 0, 0), SCREEN_HEIGHT - 1)
 
-        w_err = self._validate_dimension("width", width, SCREEN_WIDTH)
-        if w_err:
-            return ToolResult(content=w_err, is_error=True)
-        h_err = self._validate_dimension("height", height, SCREEN_HEIGHT)
-        if h_err:
-            return ToolResult(content=h_err, is_error=True)
+        # width/heightを画面サイズにクランプ
+        if width is not None:
+            width = min(max(int(width) if isinstance(width, (int, float)) else 1, 1), SCREEN_WIDTH)
+        if height is not None:
+            height = min(max(int(height) if isinstance(height, (int, float)) else 1, 1), SCREEN_HEIGHT)
         if not isinstance(clear, bool):
             return ToolResult(content="clear は true/false で指定してください。", is_error=True)
 
@@ -698,10 +694,34 @@ class DisplayImageTool(ToolBase):
                 )
 
         if x + width > SCREEN_WIDTH or y + height > SCREEN_HEIGHT:
-            return ToolResult(
-                content="描画領域が画面外です。x+width<=135, y+height<=240 を満たしてください。",
-                is_error=True,
+            max_w = SCREEN_WIDTH - x
+            max_h = SCREEN_HEIGHT - y
+            new_w, new_h = _fit_size(width, height, max_w, max_h)
+            if new_w <= 0 or new_h <= 0:
+                return ToolResult(
+                    content="描画可能な領域がありません。座標を見直してください。",
+                    is_error=True,
+                )
+            logger.info(
+                f"画像を画面内に自動調整: {width}x{height} -> {new_w}x{new_h} (x={x}, y={y})"
             )
+            if Image is None:
+                return ToolResult(
+                    content="Pillow未インストールのため自動リサイズできません。",
+                    is_error=True,
+                )
+            try:
+                img = Image.frombytes("RGB", (width, height),
+                                      _rgb565_be_to_rgb888(rgb565))
+                resampling = getattr(Image, "Resampling", Image)
+                img = img.resize((new_w, new_h), resampling.LANCZOS)
+                rgb565 = _rgb888_to_rgb565_be(img.tobytes())
+                width, height = new_w, new_h
+            except Exception as e:
+                return ToolResult(
+                    content=f"自動リサイズ中にエラーが発生しました: {e}",
+                    is_error=True,
+                )
 
         pipelines = self._get_pipelines()
         if not pipelines:
