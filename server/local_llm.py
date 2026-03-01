@@ -136,7 +136,11 @@ class LocalLLM:
             "max_tokens": 512,
         }
         if settings.llm_reasoning:
-            kwargs["reasoning_effort"] = settings.llm_reasoning
+            val = settings.llm_reasoning.lower()
+            if val in ("true", "false"):
+                kwargs["reasoning_effort"] = val == "true"
+            else:
+                kwargs["reasoning_effort"] = settings.llm_reasoning
             kwargs["drop_params"] = True
         if tools:
             kwargs["tools"] = tools
