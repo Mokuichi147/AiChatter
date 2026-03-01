@@ -25,6 +25,7 @@ class SubAgentRunner:
         self._tool_adapter = tool_adapter
         self._max_rounds = max(1, max_rounds)
         self._result_max_chars = max(500, result_max_chars)
+        self._partial_result: SubAgentJobResult | None = None
 
     @staticmethod
     def _build_system_prompt() -> str:
@@ -109,10 +110,18 @@ class SubAgentRunner:
         ]
         tools = self._tool_adapter.to_openai_tools()
         used_tools: list[str] = []
+        last_content: str = ""
+        self._partial_result = None
 
         for round_num in range(self._max_rounds):
             logger.info(f"サブエージェント推論ラウンド {round_num + 1}/{self._max_rounds}")
             response = await self._llm.complete(messages, tools=tools if tools else None)
+
+            if response.content:
+                last_content = response.content
+                self._partial_result = self._make_partial_result(
+                    last_content, used_tools
+                )
 
             if not response.tool_calls:
                 return self._make_result(response.content, used_tools)
@@ -147,11 +156,41 @@ class SubAgentRunner:
                     }
                 )
 
+        logger.warning("サブエージェント ラウンド上限到達、最終結果を要求")
         messages.append(
             {
                 "role": "user",
                 "content": "ここまでの情報で最終結果をJSONオブジェクトのみで返してください。",
             }
         )
-        final = await self._llm.complete(messages, tools=None)
-        return self._make_result(final.content, used_tools)
+        try:
+            final = await self._llm.complete(messages, tools=None)
+            return self._make_result(final.content, used_tools)
+        except Exception as e:
+            logger.warning(f"サブエージェント最終応答取得失敗: {e}")
+            return self._make_partial_result(last_content, used_tools)
+
+    def get_partial_result(self) -> SubAgentJobResult | None:
+        """タイムアウト等で中断された場合に途中結果を返す。"""
+        return self._partial_result
+
+    def _make_partial_result(
+        self, last_content: str, used_tools: list[str]
+    ) -> SubAgentJobResult:
+        """途中結果から可能な限りの結果を生成する。"""
+        data = self._extract_json(last_content) if last_content else {}
+        answer = str(data.get("answer") or "").strip()
+        if not answer:
+            answer = last_content.strip() if last_content else "ラウンド上限に達しました。"
+
+        uniq_tools = list(OrderedDict.fromkeys(t for t in used_tools if t))
+        limitations = self._to_str_list(data.get("limitations"))
+        limitations.append("ラウンド上限到達のため途中結果です")
+
+        return SubAgentJobResult(
+            answer=self._trim(answer),
+            findings=[self._trim(v) for v in self._to_str_list(data.get("findings"))],
+            evidence=[self._trim(v) for v in self._to_str_list(data.get("evidence"))],
+            limitations=[self._trim(v) for v in limitations],
+            used_tools=uniq_tools,
+        )

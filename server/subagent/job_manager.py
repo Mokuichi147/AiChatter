@@ -42,10 +42,18 @@ class SubAgentJobManager:
                 result = await self._runner.run(job.request)
         except TimeoutError:
             logger.warning(f"サブエージェントジョブタイムアウト: {job_id}")
+            partial = self._runner.get_partial_result()
             async with self._lock:
                 job = self._jobs[job_id]
-                job.status = "timed_out"
-                job.error = f"タイムアウトしました ({self._timeout_sec}秒)"
+                if partial is not None:
+                    partial.limitations.append(
+                        f"タイムアウト({self._timeout_sec}秒)のため途中結果です"
+                    )
+                    job.status = "succeeded"
+                    job.result = partial
+                else:
+                    job.status = "timed_out"
+                    job.error = f"タイムアウトしました ({self._timeout_sec}秒)"
                 job.finished_at = now_str()
                 self._completed_messages.append(self._build_completion_message(job))
         except Exception as e:
