@@ -13,6 +13,11 @@ from config import character, character_data_path, settings
 
 logger = logging.getLogger(__name__)
 
+# MLX (Metal GPU) 推論のグローバルロック
+# ASR/TTSは run_in_executor でスレッドプールから実行されるが、
+# Metal GPUコマンドバッファはスレッドセーフではないためシリアライズが必要
+_gpu_lock = asyncio.Lock()
+
 # WebSocketメッセージタイプ (Server → ESP32)
 MSG_TTS_CHUNK = 0x02
 MSG_TTS_END = 0x03
@@ -152,10 +157,11 @@ class AudioPipeline:
 
         loop = asyncio.get_event_loop()
         for segment in segments:
-            chunks = await loop.run_in_executor(
-                None,
-                lambda s=segment: list(self.tts.synthesize_chunks(s)),
-            )
+            async with _gpu_lock:
+                chunks = await loop.run_in_executor(
+                    None,
+                    lambda s=segment: list(self.tts.synthesize_chunks(s)),
+                )
             for chunk in chunks:
                 if self._interrupted or self._ws_closed:
                     break
@@ -328,7 +334,8 @@ class AudioPipeline:
         try:
             # --- ASR ---
             loop = asyncio.get_event_loop()
-            text = await loop.run_in_executor(None, self.asr.transcribe, audio_data)
+            async with _gpu_lock:
+                text = await loop.run_in_executor(None, self.asr.transcribe, audio_data)
 
             if not text or text == "はい。":
                 logger.info("ASR: 空の認識結果、TTS_END送信")

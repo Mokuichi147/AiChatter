@@ -12,12 +12,15 @@
 
 #define TAG "WS_CLIENT"
 #define HEADER_SIZE 7  // [type:1][seq_hi:1][seq_lo:1][len:4]
+#define RECONNECT_CHECK_INTERVAL_MS  5000  /* 接続監視間隔 */
+#define RECONNECT_FORCE_AFTER_MS    15000  /* この期間未接続なら強制再接続 */
 
 static esp_websocket_client_handle_t s_client = NULL;
 static tts_audio_callback_t s_tts_cb = NULL;
 static tts_end_callback_t s_end_cb = NULL;
 static uint16_t s_seq = 0;
 static uint8_t s_current_msg_type = 0;  /* フレーム分割配信時のメッセージタイプ保持 */
+static volatile bool s_started = false;  /* クライアント起動済みフラグ */
 
 /* フレーム再組立バッファ (分割配信対策) */
 #define REASSEMBLY_BUF_SIZE  (4096 + HEADER_SIZE)
@@ -56,7 +59,8 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
             break;
 
         case WEBSOCKET_EVENT_ERROR:
-            ESP_LOGE(TAG, "WebSocketエラー");
+            ESP_LOGE(TAG, "WebSocketエラー (自動再接続待機中...)");
+            state_machine_post_event(SM_EVENT_WS_DISCONNECTED, NULL, 0);
             break;
 
         case WEBSOCKET_EVENT_DATA:
@@ -152,6 +156,36 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
     }
 }
 
+/* 接続監視タスク: 未接続が一定期間続いたらstop→startで強制再接続 */
+static void ws_reconnect_task(void *arg) {
+    TickType_t disconnect_since = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(RECONNECT_CHECK_INTERVAL_MS));
+        if (!s_client || !s_started) continue;
+
+        if (esp_websocket_client_is_connected(s_client)) {
+            disconnect_since = 0;
+            continue;
+        }
+
+        /* 未接続状態の開始を記録 */
+        if (disconnect_since == 0) {
+            disconnect_since = xTaskGetTickCount();
+            continue;
+        }
+
+        TickType_t elapsed = xTaskGetTickCount() - disconnect_since;
+        if (elapsed >= pdMS_TO_TICKS(RECONNECT_FORCE_AFTER_MS)) {
+            ESP_LOGW(TAG, "長時間未接続 → 強制再接続");
+            esp_websocket_client_stop(s_client);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_websocket_client_start(s_client);
+            disconnect_since = 0;
+        }
+    }
+}
+
 void ws_client_init(const char *uri, tts_audio_callback_t tts_cb,
                     tts_end_callback_t end_cb) {
     s_tts_cb = tts_cb;
@@ -159,16 +193,19 @@ void ws_client_init(const char *uri, tts_audio_callback_t tts_cb,
 
     esp_websocket_client_config_t cfg = {
         .uri = uri,
-        .reconnect_timeout_ms = 3000,
-        .network_timeout_ms = 120000,
+        .reconnect_timeout_ms = 1000,
+        .network_timeout_ms = 10000,
         .buffer_size = 65536,
-        .ping_interval_sec = 15,
+        .ping_interval_sec = 10,
     };
 
     s_client = esp_websocket_client_init(&cfg);
     esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY,
                                   ws_event_handler, NULL);
     esp_websocket_client_start(s_client);
+    s_started = true;
+
+    xTaskCreate(ws_reconnect_task, "ws_reconn", 2048, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "WebSocketクライアント起動: %s", uri);
 }
@@ -191,7 +228,7 @@ void ws_client_send_audio(const int16_t *samples, size_t count) {
     memcpy(buf + HEADER_SIZE, samples, payload_len);
 
     int ret = esp_websocket_client_send_bin(s_client, (const char *)buf,
-                                             total_len, pdMS_TO_TICKS(200));
+                                             total_len, pdMS_TO_TICKS(1000));
     if (ret < 0) {
         ESP_LOGW(TAG, "音声送信失敗");
     }
