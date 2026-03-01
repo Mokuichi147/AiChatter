@@ -330,7 +330,7 @@ class AudioPipeline:
             loop = asyncio.get_event_loop()
             text = await loop.run_in_executor(None, self.asr.transcribe, audio_data)
 
-            if not text:
+            if not text or text == "はい。":
                 logger.info("ASR: 空の認識結果、TTS_END送信")
                 header = make_header(MSG_TTS_END, self._next_seq(), 0)
                 await self._safe_send(header)
