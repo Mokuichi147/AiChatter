@@ -389,6 +389,8 @@ class AudioPipeline:
 
     async def process_button_press(self) -> None:
         """ボタン押下をLLMに伝えて応答を生成する。"""
+        # 進行中のパイプラインを停止してから実行
+        await self.process_interrupt()
         await self.generate_from_text(
             "[ボタン押下] ユーザーがボタンを押しました。反応してください。"
         )

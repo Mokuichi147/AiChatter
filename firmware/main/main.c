@@ -191,8 +191,16 @@ static void button_task(void *arg) {
                     state_machine_post_event(SM_EVENT_VAD_START, NULL, 0);
                 }
             } else {
-                /* 短押し: サーバーにボタン通知 */
-                ESP_LOGI(TAG, "KEY1短押し: ボタン通知送信");
+                /* 短押し: 処理中/再生中なら先に割り込みしてからボタン通知 */
+                sm_state_t state = state_machine_get_state();
+                if (state == SM_STATE_SPEAKING || state == SM_STATE_PROCESSING) {
+                    ESP_LOGI(TAG, "KEY1短押し: 割り込み→ボタン通知送信");
+                    audio_hal_stop_playback();
+                    ws_client_send_interrupt();
+                    state_machine_post_event(SM_EVENT_VAD_START, NULL, 0);
+                } else {
+                    ESP_LOGI(TAG, "KEY1短押し: ボタン通知送信");
+                }
                 ws_client_send_button();
             }
         }
@@ -213,7 +221,7 @@ static void button_task(void *arg) {
                 state_machine_post_event(SM_EVENT_WAKE, NULL, 0);
             } else {
                 ESP_LOGI(TAG, "KEY2: スリープ");
-                state_machine_post_event(SM_EVENT_SLEEP, NULL, 0);
+                state_machine_post_event(SM_EVENT_SLEEP_NOW, NULL, 0);
             }
         }
 

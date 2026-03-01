@@ -27,6 +27,7 @@ static TimerHandle_t  s_silence_timer = NULL;
 static TimerHandle_t  s_playback_timer = NULL;
 static volatile sm_state_t s_state   = SM_STATE_IDLE;
 static bool s_sleep_pending = false;  /* 再生完了後にスリープする予約 */
+static bool s_user_sleep = false;    /* ユーザー操作によるスリープ (TTS自動復帰を抑制) */
 
 /* --------------------------------------------------------
  * 状態遷移ヘルパー
@@ -89,10 +90,20 @@ static void enter_sleep(void) {
 
 static void handle_event(sm_event_t event, const uint8_t *data,
                           size_t data_len) {
-    /* SM_EVENT_SLEEP はどの状態からでも受け付ける (SLEEP中は除く) */
+    /* SM_EVENT_SLEEP_NOW: 即時スリープ (ボタン押下用) */
+    if (event == SM_EVENT_SLEEP_NOW && s_state != SM_STATE_SLEEP) {
+        if (s_state == SM_STATE_SPEAKING || s_state == SM_STATE_PROCESSING) {
+            ws_client_send_interrupt();
+        }
+        s_user_sleep = true;
+        enter_sleep();
+        xQueueReset(s_event_queue);
+        return;
+    }
+
+    /* SM_EVENT_SLEEP: 再生完了待ちスリープ (サーバーからのMSG_SLEEP用) */
     if (event == SM_EVENT_SLEEP && s_state != SM_STATE_SLEEP) {
         if (s_state == SM_STATE_SPEAKING) {
-            /* 再生中: 再生完了後にスリープする予約 */
             s_sleep_pending = true;
             ESP_LOGI(TAG, "スリープ予約 (再生完了後に実行)");
         } else {
@@ -192,10 +203,11 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         /* ---- SLEEP: スリープ中 ---- */
         case SM_STATE_SLEEP:
             if (event == SM_EVENT_WAKE) {
+                s_user_sleep = false;
                 audio_hal_wake();
                 lcd_wake();
                 set_state(SM_STATE_IDLE);
-            } else if (event == SM_EVENT_WS_TTS_CHUNK) {
+            } else if (event == SM_EVENT_WS_TTS_CHUNK && !s_user_sleep) {
                 /* 通知等でTTS受信 → 自動復帰 */
                 audio_hal_wake();
                 lcd_wake();
