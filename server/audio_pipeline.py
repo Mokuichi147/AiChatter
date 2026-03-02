@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import struct
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -178,10 +179,17 @@ class AudioPipeline:
         loop = asyncio.get_event_loop()
         for segment in segments:
             async with _gpu_lock:
-                chunks = await loop.run_in_executor(
-                    None,
-                    lambda s=segment: list(self.tts.synthesize_chunks(s)),
-                )
+                done_event = threading.Event()
+                def _tts_work(s=segment):
+                    try:
+                        return list(self.tts.synthesize_chunks(s))
+                    finally:
+                        done_event.set()
+                try:
+                    chunks = await loop.run_in_executor(None, _tts_work)
+                except asyncio.CancelledError:
+                    done_event.wait(timeout=30)
+                    raise
             for chunk in chunks:
                 if self._interrupted or self._ws_closed:
                     break
@@ -328,7 +336,17 @@ class AudioPipeline:
             # --- ASR ---
             loop = asyncio.get_event_loop()
             async with _gpu_lock:
-                text = await loop.run_in_executor(None, self.asr.transcribe, audio_data)
+                done_event = threading.Event()
+                def _asr_work():
+                    try:
+                        return self.asr.transcribe(audio_data)
+                    finally:
+                        done_event.set()
+                try:
+                    text = await loop.run_in_executor(None, _asr_work)
+                except asyncio.CancelledError:
+                    done_event.wait(timeout=30)
+                    raise
 
             if not text or text == "はい。":
                 logger.info("ASR: 空の認識結果、TTS_END送信")

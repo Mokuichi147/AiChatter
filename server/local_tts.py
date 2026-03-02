@@ -149,6 +149,13 @@ class LocalTTS:
         text = _SPEAKABLE_RE.sub("", text).strip()
         if not text:
             return
+        # 句読点・記号のみで発音可能文字がない場合はスキップ
+        if not re.search(
+            r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF"
+            r"a-zA-Zａ-ｚＡ-Ｚ0-9０-９]",
+            text,
+        ):
+            return
 
         try:
             # Baseモデルで声クローンTTS
