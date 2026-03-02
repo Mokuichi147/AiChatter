@@ -204,7 +204,7 @@ class LocalLLM:
 
         # LLM生出力をログ（thinkタグ除去前）
         if raw_content and not buffer.strip():
-            logger.warning(f"LLM生出力あり(thinkタグ等で除去済み): {raw_content[:200]}")
+            logger.debug(f"LLM生出力あり(thinkタグ等で除去済み): {raw_content[:200]}")
 
         # 残りのバッファを出力
         if buffer.strip():
