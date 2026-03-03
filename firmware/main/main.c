@@ -258,9 +258,22 @@ void app_main(void) {
 
     /* WiFi接続 */
     if (!wifi_connect()) {
-        ESP_LOGE(TAG, "WiFi接続失敗");
+        ESP_LOGE(TAG, "WiFi接続失敗 → リトライ開始");
+        lcd_set_state(LCD_STATE_OFFLINE);
         while (true) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            s_retry_count = 0;
+            esp_wifi_connect();
+            EventBits_t bits = xEventGroupWaitBits(
+                s_wifi_event_group,
+                WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                pdTRUE, pdFALSE,
+                pdMS_TO_TICKS(15000));
+            if (bits & WIFI_CONNECTED_BIT) {
+                ESP_LOGI(TAG, "WiFi再接続成功");
+                break;
+            }
+            ESP_LOGW(TAG, "WiFi再接続失敗 → 10秒後にリトライ");
         }
     }
 

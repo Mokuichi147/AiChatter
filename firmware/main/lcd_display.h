@@ -13,6 +13,7 @@ typedef enum {
     LCD_STATE_PROCESSING = 2,  /**< AI処理中 (黄) */
     LCD_STATE_SPEAKING   = 3,  /**< 音声再生中 (緑) */
     LCD_STATE_SLEEP      = 4,  /**< スリープ中 (バックライト消灯) */
+    LCD_STATE_OFFLINE    = 6,  /**< サーバー未接続 (赤) */
 } lcd_state_t;
 
 /**

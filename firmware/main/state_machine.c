@@ -28,6 +28,7 @@ static TimerHandle_t  s_playback_timer = NULL;
 static volatile sm_state_t s_state   = SM_STATE_IDLE;
 static bool s_sleep_pending = false;  /* 再生完了後にスリープする予約 */
 static bool s_user_sleep = false;    /* ユーザー操作によるスリープ (TTS自動復帰を抑制) */
+static bool s_ws_connected = false;  /* WebSocket接続状態 */
 
 /* --------------------------------------------------------
  * 状態遷移ヘルパー
@@ -112,19 +113,49 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         return;
     }
 
-    /* WebSocket切断: どの状態でもIDLEにリセット (SLEEP中は除く) */
-    if (event == SM_EVENT_WS_DISCONNECTED && s_state != SM_STATE_SLEEP) {
-        ESP_LOGW(TAG, "WebSocket切断 → IDLEへリセット");
-        xTimerStop(s_silence_timer, 0);
-        xTimerStop(s_playback_timer, 0);
-        audio_hal_stop_playback();
-        set_state(SM_STATE_IDLE);
+    /* WebSocket切断 */
+    if (event == SM_EVENT_WS_DISCONNECTED) {
+        s_ws_connected = false;
+        if (s_state == SM_STATE_LISTENING ||
+            s_state == SM_STATE_VAD_SILENCE) {
+            /* 発話中 → 中断せず続行、EOS時点でWS状態を判定 */
+            ESP_LOGW(TAG, "WebSocket切断 (発話継続中、EOS時に判定)");
+        } else if (s_state == SM_STATE_SPEAKING) {
+            ESP_LOGW(TAG, "WebSocket切断 → 再生停止してOFFLINE");
+            xTimerStop(s_playback_timer, 0);
+            audio_hal_stop_playback();
+            s_state = SM_STATE_IDLE;
+            lcd_set_state(LCD_STATE_OFFLINE);
+        } else if (s_state == SM_STATE_PROCESSING) {
+            ESP_LOGW(TAG, "WebSocket切断 → PROCESSING破棄してOFFLINE");
+            s_state = SM_STATE_IDLE;
+            lcd_set_state(LCD_STATE_OFFLINE);
+        } else if (s_state == SM_STATE_IDLE) {
+            ESP_LOGW(TAG, "WebSocket切断 → OFFLINE表示");
+            lcd_set_state(LCD_STATE_OFFLINE);
+        }
+        /* SLEEP中は何もしない */
         return;
     }
 
-    /* WebSocket再接続: ログのみ (IDLEのまま正常動作) */
+    /* WebSocket再接続 */
     if (event == SM_EVENT_WS_CONNECTED) {
-        ESP_LOGI(TAG, "WebSocket再接続");
+        s_ws_connected = true;
+        if (s_state == SM_STATE_LISTENING ||
+            s_state == SM_STATE_VAD_SILENCE) {
+            /* 発話継続中 → リセットせずそのまま続行 (以降の音声は送信される) */
+            ESP_LOGI(TAG, "WebSocket再接続 → 発話継続");
+        } else if (s_state == SM_STATE_PROCESSING) {
+            /* サーバー再起動でリクエスト消失 → IDLEへ */
+            ESP_LOGW(TAG, "WebSocket再接続 → PROCESSING破棄してIDLEへ");
+            xTimerStop(s_playback_timer, 0);
+            set_state(SM_STATE_IDLE);
+        } else if (s_state == SM_STATE_IDLE) {
+            ESP_LOGI(TAG, "WebSocket再接続 → IDLE表示復帰");
+            lcd_set_state(LCD_STATE_IDLE);
+        } else {
+            ESP_LOGI(TAG, "WebSocket再接続");
+        }
         return;
     }
 
@@ -132,6 +163,7 @@ static void handle_event(sm_event_t event, const uint8_t *data,
         /* ---- IDLE: 待機中 ---- */
         case SM_STATE_IDLE:
             if (event == SM_EVENT_VAD_START) {
+                ws_client_clear_audio_buffer();
                 set_state(SM_STATE_LISTENING);
             } else if (event == SM_EVENT_WS_TTS_CHUNK) {
                 /* 通知等でTTS受信 → 再生状態へ */
@@ -157,9 +189,16 @@ static void handle_event(sm_event_t event, const uint8_t *data,
                 xTimerStop(s_silence_timer, 0);
                 set_state(SM_STATE_LISTENING);
             } else if (event == SM_EVENT_VAD_SILENCE_TIMEOUT) {
-                /* タイムアウト: EOS送信してAI処理へ */
-                ws_client_send_end_of_speech();
-                set_state(SM_STATE_PROCESSING);
+                /* タイムアウト: WS接続中ならEOS送信、未接続ならIDLEへ戻す */
+                if (ws_client_is_connected()) {
+                    ws_client_send_end_of_speech();
+                    set_state(SM_STATE_PROCESSING);
+                } else {
+                    ESP_LOGW(TAG, "WS未接続のためEOS破棄 → IDLE");
+                    ws_client_clear_audio_buffer();
+                    s_state = SM_STATE_IDLE;
+                    lcd_set_state(LCD_STATE_OFFLINE);
+                }
             }
             break;
 

@@ -280,6 +280,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             pipeline = AudioPipeline(send_fn, _asr, _llm, _tts, _tool_registry, _memory_store)
             _active_pipelines.append(pipeline)
+            await pipeline.send_wake()
             logger.info("AIパイプラインモード")
         except Exception as e:
             logger.warning(f"AIパイプライン初期化失敗 (エコーモードにフォールバック): {e}")

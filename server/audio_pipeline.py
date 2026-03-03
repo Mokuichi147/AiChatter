@@ -3,9 +3,10 @@ import json
 import logging
 import struct
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, ClassVar, Optional
 
 from local_asr import LocalASR
 from local_llm import LocalLLM, TextChunk, ToolCallRequest
@@ -38,6 +39,10 @@ def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
 
 
 class AudioPipeline:
+    _cached_history: ClassVar[Optional[list[dict]]] = None
+    _cached_at: ClassVar[float] = 0.0
+    _CACHE_TTL: ClassVar[float] = 120.0  # 2分以内 → キャッシュ利用
+
     def __init__(
         self,
         send_fn: Callable[[bytes], Awaitable[None]],
@@ -56,7 +61,7 @@ class AudioPipeline:
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
-        self._history: list[dict] = self._load_history()
+        self._history: list[dict] = self._restore_history()
         self._interrupted: bool = False
         self._current_task: Optional[asyncio.Task] = None
         self._pipeline_lock = asyncio.Lock()
@@ -87,6 +92,17 @@ class AudioPipeline:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"会話履歴の読み込み失敗: {e}")
             return []
+
+    @classmethod
+    def _restore_history(cls) -> list[dict]:
+        """キャッシュが有効ならキャッシュから、そうでなければファイルから履歴を復元する。"""
+        if cls._cached_history and (time.monotonic() - cls._cached_at) < cls._CACHE_TTL:
+            history = list(cls._cached_history)
+            cls._cached_history = None
+            logger.info(f"キャッシュから会話履歴を復元: {len(history) // 2}往復")
+            return history
+        cls._cached_history = None
+        return cls._load_history()
 
     def _save_history(self, new_entries: list[dict]) -> None:
         """新しい会話エントリをファイルに追記する。"""
@@ -145,6 +161,12 @@ class AudioPipeline:
 
     async def close(self) -> None:
         """パイプラインの進行中処理を停止し、参照を解放する。"""
+        # 再接続に備えて履歴をキャッシュ
+        if self._history:
+            AudioPipeline._cached_history = list(self._history)
+            AudioPipeline._cached_at = time.monotonic()
+            logger.info(f"会話履歴をキャッシュ: {len(self._history) // 2}往復")
+
         self._interrupted = True
         self._ws_closed = True
         self._sleep_after_tts = False

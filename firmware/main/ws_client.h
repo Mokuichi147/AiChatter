@@ -51,3 +51,8 @@ void ws_client_send_button(void);
  * @brief WebSocket接続状態を返す
  */
 bool ws_client_is_connected(void);
+
+/**
+ * @brief オフライン音声バッファをクリアする
+ */
+void ws_client_clear_audio_buffer(void);

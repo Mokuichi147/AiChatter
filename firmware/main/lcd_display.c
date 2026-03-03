@@ -36,6 +36,7 @@
 #define COLOR_GREEN     0x07E0
 #define COLOR_WHITE     0xFFFF
 #define COLOR_GRAY      0x4208
+#define COLOR_RED       0xF800
 
 /* テキスト描画設定 */
 #define FONT_W          6    /* フォント幅(px) */
@@ -440,6 +441,10 @@ void lcd_set_state(lcd_state_t state) {
         case LCD_STATE_SLEEP:
             color = COLOR_BLACK;
             name = "SLEEP";
+            break;
+        case LCD_STATE_OFFLINE:
+            color = COLOR_RED;
+            name = "OFFLINE";
             break;
         default:
             color = COLOR_GRAY;
