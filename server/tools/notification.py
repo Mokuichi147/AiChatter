@@ -168,9 +168,9 @@ class NotificationStore:
 class SetNotificationTool(ToolBase):
     name = "set_notification"
     description = (
-        "指定した日時にユーザーへ通知を予約します。"
-        "日時は 'YYYY-MM-DD HH:MM' 形式で指定してください。"
-        "repeatを指定すると定期通知になります。"
+        "指定した日時に通知を予約します。"
+        "日時は 'YYYY-MM-DD HH:MM' 形式で指定します。"
+        "repeatを指定すると定期通知として登録します。"
     )
     input_schema = {
         "type": "object",
@@ -249,7 +249,7 @@ class SetNotificationTool(ToolBase):
 
 class ListNotificationsTool(ToolBase):
     name = "list_notifications"
-    description = "予約済みの通知一覧を表示します。"
+    description = "予約済みの通知一覧を取得します。"
     input_schema = {
         "type": "object",
         "properties": {},
@@ -273,7 +273,7 @@ class ListNotificationsTool(ToolBase):
 
 class DeleteNotificationTool(ToolBase):
     name = "delete_notification"
-    description = "指定IDの予約済み通知を削除します。事前にlist_notificationsでIDを確認してください。"
+    description = "指定IDの通知を削除します。削除前にlist_notificationsでIDを確認してください。"
     input_schema = {
         "type": "object",
         "properties": {

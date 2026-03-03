@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class SetSleepTool(ToolBase):
     name = "set_sleep"
-    description = "デバイスをスリープモードにします。マイクとスピーカーが停止し、画面が消灯します。"
+    description = "接続中のデバイスをスリープモードにします。マイクとスピーカーが停止し、画面が消灯します。"
     input_schema = {
         "type": "object",
         "properties": {},

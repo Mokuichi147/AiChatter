@@ -9,8 +9,8 @@ from tools.base import ToolBase, ToolResult
 class RunSubAgentResearchTool(ToolBase):
     name = "run_subagent_research"
     description = (
-        "バックグラウンドでサブエージェント調査ジョブを開始します。"
-        "すぐにjob_idを返し、完了結果は get_subagent_job で取得できます。"
+        "時間のかかる調査をバックグラウンドジョブとして開始します。"
+        "すぐにjob_idを返し、完了後は get_subagent_job で結果を取得できます。"
     )
     input_schema = {
         "type": "object",
@@ -63,7 +63,7 @@ class RunSubAgentResearchTool(ToolBase):
 
 class ListSubAgentJobsTool(ToolBase):
     name = "list_subagent_jobs"
-    description = "サブエージェントジョブの一覧を取得します。"
+    description = "サブエージェント調査ジョブの一覧を取得します。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -109,7 +109,7 @@ class ListSubAgentJobsTool(ToolBase):
 
 class GetSubAgentJobTool(ToolBase):
     name = "get_subagent_job"
-    description = "指定したjob_idのサブエージェントジョブ詳細を取得します。"
+    description = "指定したjob_idのサブエージェント調査ジョブ詳細を取得します。"
     input_schema = {
         "type": "object",
         "properties": {

@@ -187,7 +187,7 @@ class MemoryStore:
 
 class SaveMemoryTool(ToolBase):
     name = "save_memory"
-    description = "情報を記憶に保存します。ユーザーの名前・好み・重要な事実・約束事など、後で役立ちそうな情報を自主的に記録してください。"
+    description = "会話の継続に役立つ情報を記憶として保存します。ユーザーの名前・好み・重要な事実・約束など、後で参照する価値が高い内容に使います。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -218,7 +218,7 @@ class SaveMemoryTool(ToolBase):
 
 class SearchMemoryTool(ToolBase):
     name = "search_memory"
-    description = "保存された記憶や過去の会話履歴を検索します。日付で絞り込んだり、include_autoで会話履歴を除外できます。"
+    description = "保存された記憶や過去の会話履歴を検索します。日付での絞り込みや、include_autoによる会話履歴の除外が可能です。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -265,7 +265,7 @@ class SearchMemoryTool(ToolBase):
 
 class DeleteMemoryTool(ToolBase):
     name = "delete_memory"
-    description = "保存された記憶を削除します。事前にsearch_memoryでキーを確認してください。"
+    description = "保存済みの記憶を削除します。削除前にsearch_memoryでキーを確認してください。"
     input_schema = {
         "type": "object",
         "properties": {

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class SetVolumeTool(ToolBase):
     name = "set_volume"
-    description = "音声の音量を変更します。レベル1（最小）〜10（最大）で指定してください。"
+    description = "音声出力の音量を変更します。レベル1（最小）から10（最大）で指定します。"
     input_schema = {
         "type": "object",
         "properties": {

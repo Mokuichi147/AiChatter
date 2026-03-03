@@ -12,7 +12,7 @@ TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 class SearchTool(ToolBase):
     name = "web_search"
-    description = "Webで最新情報を検索します。ニュース・天気・時事問題など、リアルタイムの情報が必要なときに使います。"
+    description = "Webで最新情報を調べます。ニュース・天気・時事・価格など、変化しやすい情報が必要なときに使います。"
     input_schema = {
         "type": "object",
         "properties": {

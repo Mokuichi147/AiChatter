@@ -394,8 +394,8 @@ def _load_from_mermaid(
 class DisplayTextTool(ToolBase):
     name = "display_text"
     description = (
-        "M5StickS3のディスプレイにテキストを表示します。"
-        "日本語対応。size(1-4)で文字サイズを指定できます。"
+        "M5StickS3の画面にテキストを表示します。"
+        "日本語対応で、size(1-4)で文字サイズを指定できます。"
     )
     input_schema = {
         "type": "object",
@@ -498,8 +498,8 @@ class DisplayTextTool(ToolBase):
 class DisplayImageTool(ToolBase):
     name = "display_image"
     description = (
-        "M5StickS3のディスプレイに画像を表示します。"
-        "image_path/image_url/svg/mermaid/rgb565_base64 のいずれか1つを指定してください。"
+        "M5StickS3の画面に画像を表示します。"
+        "image_path/image_url/svg/mermaid/rgb565_base64 のいずれか1つを指定します。"
     )
     input_schema = {
         "type": "object",
