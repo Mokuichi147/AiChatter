@@ -132,6 +132,9 @@ class Settings(BaseSettings):
 
     # キャラクター設定ファイル
     character_file: str = "character.yaml"
+    # REST/CLI向けキャラクターカタログ設定
+    character_dir: str = "."
+    character_glob: str = "character*.yaml"
 
     # プロンプト設定ファイル
     prompt_file: str = "prompt.yaml"
@@ -150,6 +153,8 @@ class Settings(BaseSettings):
     # 会話履歴の永続化
     history_file: str = "data/history.json"
     history_restore_count: int = 3
+    default_history_mode: str = "shared"
+    chat_max_history_messages: int = 20
 
     # 通知の永続化
     notification_file: str = "data/notifications.json"

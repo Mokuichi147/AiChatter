@@ -7,7 +7,7 @@ from typing import Iterator
 
 import numpy as np
 
-from config import character, character_data_path
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class LocalTTS:
         self._resample = _signal.resample_poly
         self.volume_scale: int = self._load_volume_scale()
 
-        voice_config = character.voice
+        voice_config = config.character.voice
         self.voice_config = voice_config
 
         # 参照音声を準備（description→生成、reference→ユーザー提供）
@@ -62,7 +62,7 @@ class LocalTTS:
     def _load_volume_scale() -> int:
         """settings.jsonから音量レベルを読み込みスケール値を返す。"""
         try:
-            settings_path = Path(character_data_path("settings.json"))
+            settings_path = Path(config.character_data_path("settings.json"))
             if not settings_path.is_absolute():
                 settings_path = Path(__file__).parent / settings_path
             if settings_path.exists():

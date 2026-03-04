@@ -11,7 +11,8 @@ from typing import Awaitable, Callable, ClassVar, Optional
 from local_asr import LocalASR
 from local_llm import LocalLLM, TextChunk, ToolCallRequest
 from local_tts import LocalTTS
-from config import character, character_data_path, prompt_config, settings
+import config
+from config import character_data_path, prompt_config, settings
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ class AudioPipeline:
 
     def _build_system_prompt(self, extra_instruction: str = "") -> str:
         """システムプロンプトを組み立てる。"""
-        system_prompt = character.persona.system_prompt or settings.system_prompt
+        system_prompt = config.character.persona.system_prompt or settings.system_prompt
 
         # 共通フォーマット指示を追加
         if prompt_config.output_rules:

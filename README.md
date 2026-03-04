@@ -63,6 +63,63 @@ cp .env.example .env
 uv run python main.py
 ```
 
+#### デフォルトキャラクターをファイル名で指定して起動
+```bash
+cd server
+uv run python main.py --character character_amamya.yaml
+```
+
+### Stage 1.5: M5未接続での利用（REST/CLI/SDK）
+
+#### REST API（同期応答）
+```bash
+curl -X POST http://127.0.0.1:8765/api/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"demo","history_mode":"isolated","character_id":"character.yaml"}'
+
+curl -X POST http://127.0.0.1:8765/api/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"demo","text":"こんにちは"}'
+```
+
+#### REST API（SSEストリーミング）
+```bash
+curl -N -X POST http://127.0.0.1:8765/api/v1/chat/stream \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"demo","text":"今日の予定を教えて"}'
+```
+
+#### キャラクター一覧取得
+```bash
+curl http://127.0.0.1:8765/api/v1/characters
+```
+
+#### CLIモード
+```bash
+cd server
+uv run python cli.py --history-mode isolated --stream
+```
+
+#### CLIからサーバー起動（`main.py -c` の代替）
+```bash
+cd server
+uv run python cli.py server -c 'character*.yaml'
+```
+
+#### Python SDK（同一プロセス）
+```python
+import asyncio
+from aichatter import create_runtime
+
+async def main():
+    runtime = await create_runtime()
+    await runtime.create_session("sdk-demo", history_mode="isolated", character_id="character.yaml")
+    result = await runtime.chat("sdk-demo", "自己紹介して")
+    print(result["text"])
+
+asyncio.run(main())
+```
+
 ### Stage 2: ファームウェアビルド
 
 ```bash

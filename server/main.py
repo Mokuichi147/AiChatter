@@ -1,14 +1,24 @@
 import asyncio
 import gc
+import glob
 import inspect
 import logging
 import os
 import struct
+import uuid
+from pathlib import Path
+from typing import AsyncIterator
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
-from config import settings, character_data_path
+from character_catalog import CharacterCatalog
+from chat_engine import ChatEngine
+from config import settings
+from session_manager import ALLOWED_HISTORY_MODES, HISTORY_MODE_SHARED, SessionManager
+from tool_factory import CAP_M5_DEVICE, ToolFactory
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,18 +47,123 @@ app = FastAPI(title="AiChatter Server")
 _asr = None
 _llm = None
 _tts = None
-_tool_registry = None
+_tool_factory: ToolFactory | None = None
+_tool_registry_ws = None
+_tool_registry_api = None
 _notification_store = None
 _memory_store = None
 _subagent_job_manager = None
 _scheduler_tasks: list[asyncio.Task] = []
 
+# REST/CLI向けコンポーネント
+_character_catalog: CharacterCatalog | None = None
+_session_manager: SessionManager | None = None
+_chat_engine: ChatEngine | None = None
+
 # アクティブなパイプライン管理
 _active_pipelines: list = []
 
 
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CreateSessionRequest(StrictModel):
+    session_id: str | None = None
+    history_mode: str | None = None
+    character_id: str | None = None
+
+
+class SetSessionCharacterRequest(StrictModel):
+    character_id: str
+
+
+class ChatRequest(StrictModel):
+    session_id: str
+    text: str
+
+
+class ChatStreamRequest(StrictModel):
+    session_id: str
+    text: str
+
+
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
     return struct.pack(">BHI", msg_type, seq & 0xFFFF, payload_len)
+
+
+def _resolve_character_cli_values(values: list[str]) -> tuple[str, str, str]:
+    """-c/--character引数を解決し、default_file/dir/globを返す。"""
+    expanded: list[str] = []
+    original_patterns: list[str] = []
+
+    for raw in values:
+        token = (raw or "").strip()
+        if not token:
+            continue
+
+        if any(ch in token for ch in "*?[]"):
+            original_patterns.append(token)
+            matched = sorted(glob.glob(token))
+            if matched:
+                expanded.extend(matched)
+            continue
+
+        expanded.append(token)
+
+    # サンプル定義は除外
+    expanded = [p for p in expanded if not str(p).endswith(".example.yaml")]
+    if not expanded:
+        raise ValueError(f"character指定に一致するファイルがありません: {values}")
+
+    default_path = Path(expanded[0]).expanduser()
+    if not default_path.is_absolute():
+        default_path = (Path.cwd() / default_path).resolve()
+    if not default_path.exists() or not default_path.is_file():
+        raise ValueError(f"デフォルトキャラクターファイルが見つかりません: {default_path}")
+
+    if original_patterns:
+        p = Path(original_patterns[0]).expanduser()
+        if p.is_absolute():
+            character_dir = str(p.parent)
+            character_glob = p.name
+        else:
+            abs_pat = (Path.cwd() / p).resolve()
+            character_dir = str(abs_pat.parent)
+            character_glob = abs_pat.name
+    else:
+        character_dir = str(default_path.parent)
+        character_glob = "character*.yaml"
+
+    return str(default_path), character_dir, character_glob
+
+
+def _validate_history_mode(history_mode: str | None) -> str:
+    mode = (history_mode or settings.default_history_mode or HISTORY_MODE_SHARED).strip().lower()
+    if mode not in ALLOWED_HISTORY_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"history_modeは {sorted(ALLOWED_HISTORY_MODES)} のいずれかを指定してください。",
+        )
+    return mode
+
+
+def _require_character_catalog() -> CharacterCatalog:
+    if _character_catalog is None:
+        raise HTTPException(status_code=503, detail="キャラクターカタログが初期化されていません。")
+    return _character_catalog
+
+
+def _require_session_manager() -> SessionManager:
+    if _session_manager is None:
+        raise HTTPException(status_code=503, detail="セッション管理が初期化されていません。")
+    return _session_manager
+
+
+def _require_chat_engine() -> ChatEngine:
+    if _chat_engine is None:
+        raise HTTPException(status_code=503, detail="チャットエンジンが初期化されていません。")
+    return _chat_engine
 
 
 async def _close_component(name: str, component: object | None) -> None:
@@ -120,12 +235,50 @@ async def _subagent_result_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager, _scheduler_tasks
+    global _asr, _llm, _tts, _tool_factory, _tool_registry_ws, _tool_registry_api
+    global _notification_store, _memory_store
+    global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
+
+    # キャラクターカタログ初期化（REST/CLI共通）
+    _character_catalog = CharacterCatalog(settings.character_dir, settings.character_glob)
+    _character_catalog.reload()
+    preferred_id = Path(settings.character_file).name if settings.character_file else ""
+    if preferred_id and not _character_catalog.has(preferred_id):
+        try:
+            _character_catalog.register_file(settings.character_file, character_id=preferred_id)
+            logger.info(f"起動時キャラクターを追加登録: {preferred_id}")
+        except Exception:
+            logger.warning(
+                f"起動時キャラクターを追加できませんでした: {settings.character_file}",
+                exc_info=True,
+            )
+    if not _character_catalog.list_entries():
+        try:
+            _character_catalog.register_file(settings.character_file)
+        except Exception as e:
+            raise RuntimeError(f"キャラクター読み込みに失敗: {e}") from e
+
+    default_character_id = _character_catalog.default_character_id(settings.character_file)
+
+    default_mode = settings.default_history_mode.strip().lower()
+    if default_mode not in ALLOWED_HISTORY_MODES:
+        logger.warning(
+            f"default_history_modeが不正です: {settings.default_history_mode} -> '{HISTORY_MODE_SHARED}' を使用"
+        )
+        default_mode = HISTORY_MODE_SHARED
+
+    _session_manager = SessionManager(
+        default_character_id=default_character_id,
+        default_history_mode=default_mode,
+        max_messages=settings.chat_max_history_messages,
+    )
+
     if not ECHO_MODE:
         logger.info("AIモデルをプリロード中...")
         from local_asr import LocalASR
         from local_llm import LocalLLM
         from local_tts import LocalTTS
+
         _asr = LocalASR()
         _llm = LocalLLM()
         _tts = LocalTTS()
@@ -133,58 +286,24 @@ async def startup_event() -> None:
 
         # ツールレジストリ初期化
         if settings.tools_enabled:
-            from tools import ToolRegistry
-            from tools.conversation_memory import (
-                MemoryStore,
-                SaveMemoryTool,
-                SearchMemoryTool,
-                DeleteMemoryTool,
+            _tool_factory = ToolFactory(
+                tts=_tts,
+                get_pipelines=lambda: _active_pipelines,
             )
-            from tools.voice_control import SetVolumeTool
-            from tools.search import SearchTool
-            from tools.notification import (
-                NotificationStore,
-                SetNotificationTool,
-                ListNotificationsTool,
-                DeleteNotificationTool,
-            )
-            from tools.sleep_control import SetSleepTool
-            from tools.display_control import DisplayTextTool, DisplayImageTool
-
-            _tool_registry = ToolRegistry()
-            _memory_store = MemoryStore(
-                character_data_path("memory.json"),
-                history_file=character_data_path("history.json"),
-            )
-            memory_store = _memory_store
-            _tool_registry.register(SaveMemoryTool(memory_store))
-            _tool_registry.register(SearchMemoryTool(memory_store))
-            _tool_registry.register(DeleteMemoryTool(memory_store))
-            _tool_registry.register(SetVolumeTool(_tts))
-            _tool_registry.register(SearchTool())
-
-            _notification_store = NotificationStore(settings.notification_file)
-            _tool_registry.register(SetNotificationTool(_notification_store))
-            _tool_registry.register(ListNotificationsTool(_notification_store))
-            _tool_registry.register(DeleteNotificationTool(_notification_store))
-            _tool_registry.register(SetSleepTool(lambda: _active_pipelines))
-            _tool_registry.register(DisplayTextTool(lambda: _active_pipelines))
-            _tool_registry.register(DisplayImageTool(lambda: _active_pipelines))
+            _tool_registry_ws = _tool_factory.create_registry({CAP_M5_DEVICE})
+            _tool_registry_api = _tool_factory.create_registry(set())
+            _memory_store = _tool_factory.memory_store
+            _notification_store = _tool_factory.notification_store
 
             if settings.subagent_enabled:
                 from subagent.job_manager import SubAgentJobManager
                 from subagent.runner import SubAgentRunner
                 from subagent.tool_adapter import SubAgentToolAdapter
                 from subagent_llm import SubAgentLLM
-                from tools.subagent_research import (
-                    GetSubAgentJobTool,
-                    ListSubAgentJobsTool,
-                    RunSubAgentResearchTool,
-                )
 
                 subagent_llm = SubAgentLLM()
                 tool_adapter = SubAgentToolAdapter(
-                    _tool_registry,
+                    _tool_registry_api,
                     settings.subagent_mcp_tool_denylist,
                 )
                 runner = SubAgentRunner(
@@ -198,14 +317,23 @@ async def startup_event() -> None:
                     timeout_sec=settings.subagent_timeout_sec,
                 )
 
-                _tool_registry.register(
-                    RunSubAgentResearchTool(_subagent_job_manager)
+                ToolFactory.register_subagent_tools(
+                    _tool_registry_ws, _subagent_job_manager
                 )
-                _tool_registry.register(ListSubAgentJobsTool(_subagent_job_manager))
-                _tool_registry.register(GetSubAgentJobTool(_subagent_job_manager))
+                ToolFactory.register_subagent_tools(
+                    _tool_registry_api, _subagent_job_manager
+                )
                 logger.info("サブエージェント機能初期化完了")
 
             logger.info("ツールレジストリ初期化完了")
+
+        # RESTチャットエンジン初期化
+        _chat_engine = ChatEngine(
+            llm=_llm,
+            session_manager=_session_manager,
+            character_catalog=_character_catalog,
+            tool_registry=_tool_registry_api,
+        )
 
         # 通知スケジューラー起動
         _scheduler_tasks = [
@@ -218,7 +346,9 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    global _asr, _llm, _tts, _tool_registry, _notification_store, _memory_store, _subagent_job_manager, _scheduler_tasks
+    global _asr, _llm, _tts, _tool_factory, _tool_registry_ws, _tool_registry_api
+    global _notification_store, _memory_store
+    global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
     logger.info("シャットダウン処理開始")
 
@@ -250,10 +380,16 @@ async def shutdown_event() -> None:
     _subagent_job_manager = None
     _notification_store = None
     _memory_store = None
-    _tool_registry = None
+    _tool_registry_ws = None
+    _tool_registry_api = None
+    _tool_factory = None
     _tts = None
     _llm = None
     _asr = None
+
+    _chat_engine = None
+    _session_manager = None
+    _character_catalog = None
 
     gc.collect()
     logger.info("シャットダウン処理完了")
@@ -261,7 +397,179 @@ async def shutdown_event() -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "mode": "echo" if ECHO_MODE else "ai"}
+    return {
+        "status": "ok",
+        "mode": "echo" if ECHO_MODE else "ai",
+        "chat_api": _chat_engine is not None,
+    }
+
+
+@app.get("/api/v1/characters")
+async def list_characters() -> dict:
+    catalog = _require_character_catalog()
+    items = []
+    for entry in catalog.list_entries():
+        persona = entry.config.persona
+        summary = (persona.system_prompt or "").strip().replace("\n", " ")
+        if len(summary) > 120:
+            summary = summary[:117] + "..."
+        items.append(
+            {
+                "character_id": entry.character_id,
+                "name": persona.name or entry.file_name,
+                "file_name": entry.file_name,
+                "summary": summary,
+            }
+        )
+    return {"items": items}
+
+
+@app.get("/api/v1/characters/{character_id}")
+async def get_character(character_id: str) -> dict:
+    catalog = _require_character_catalog()
+    try:
+        entry = catalog.get(character_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {
+        "character_id": entry.character_id,
+        "file_name": entry.file_name,
+        "name": entry.config.persona.name,
+        "system_prompt": entry.config.persona.system_prompt,
+        "voice": {
+            "type": entry.config.voice.type,
+            "description": entry.config.voice.description,
+            "sample_text": entry.config.voice.sample_text,
+            "voice_design_model": entry.config.voice.voice_design_model,
+            "wav_file": entry.config.voice.wav_file,
+            "transcript": entry.config.voice.transcript,
+            "tts_model": entry.config.voice.tts_model,
+        },
+    }
+
+
+@app.post("/api/v1/sessions")
+async def create_session(req: CreateSessionRequest) -> dict:
+    manager = _require_session_manager()
+    catalog = _require_character_catalog()
+
+    session_id = (req.session_id or "").strip() or uuid.uuid4().hex
+    history_mode = _validate_history_mode(req.history_mode)
+
+    character_id = (req.character_id or "").strip() or None
+    if character_id and not catalog.has(character_id):
+        raise HTTPException(status_code=422, detail=f"不明なcharacter_idです: {character_id}")
+
+    try:
+        state = await manager.ensure_session(
+            session_id=session_id,
+            history_mode=history_mode,
+            character_id=character_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    return {
+        "session_id": state.session_id,
+        "character_id": state.character_id,
+        "history_mode": state.history_mode,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+    }
+
+
+@app.get("/api/v1/sessions")
+async def list_sessions() -> dict:
+    manager = _require_session_manager()
+    sessions = await manager.list_sessions()
+    return {
+        "items": [
+            {
+                "session_id": s.session_id,
+                "character_id": s.character_id,
+                "history_mode": s.history_mode,
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            }
+            for s in sessions
+        ]
+    }
+
+
+@app.delete("/api/v1/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict:
+    manager = _require_session_manager()
+    deleted = await manager.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"session_idが見つかりません: {session_id}")
+    return {"deleted": True, "session_id": session_id}
+
+
+@app.patch("/api/v1/sessions/{session_id}/character")
+async def set_session_character(session_id: str, req: SetSessionCharacterRequest) -> dict:
+    manager = _require_session_manager()
+    catalog = _require_character_catalog()
+
+    character_id = req.character_id.strip()
+    if not character_id:
+        raise HTTPException(status_code=422, detail="character_idは必須です")
+    if not catalog.has(character_id):
+        raise HTTPException(status_code=422, detail=f"不明なcharacter_idです: {character_id}")
+
+    try:
+        state = await manager.set_character(session_id, character_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    return {
+        "session_id": state.session_id,
+        "character_id": state.character_id,
+        "history_mode": state.history_mode,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+    }
+
+
+@app.post("/api/v1/chat")
+async def chat(req: ChatRequest) -> dict:
+    engine = _require_chat_engine()
+    session_id = req.session_id.strip()
+    if not session_id:
+        raise HTTPException(status_code=422, detail="session_idは必須です")
+
+    try:
+        result = await engine.chat(session_id=session_id, text=req.text)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@app.post("/api/v1/chat/stream")
+async def chat_stream(req: ChatStreamRequest) -> StreamingResponse:
+    engine = _require_chat_engine()
+    session_id = req.session_id.strip()
+    if not session_id:
+        raise HTTPException(status_code=422, detail="session_idは必須です")
+
+    async def _event_generator() -> AsyncIterator[str]:
+        try:
+            async for event in engine.stream_chat(session_id=session_id, text=req.text):
+                yield ChatEngine.event_to_sse(event)
+        except Exception as e:
+            error_event = {
+                "type": "error",
+                "session_id": session_id,
+                "error": str(e),
+            }
+            yield ChatEngine.event_to_sse(error_event)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.websocket("/ws")
@@ -278,7 +586,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             async def send_fn(data: bytes) -> None:
                 await websocket.send_bytes(data)
 
-            pipeline = AudioPipeline(send_fn, _asr, _llm, _tts, _tool_registry, _memory_store)
+            pipeline = AudioPipeline(
+                send_fn, _asr, _llm, _tts, _tool_registry_ws, _memory_store
+            )
             _active_pipelines.append(pipeline)
             await pipeline.send_wake()
             logger.info("AIパイプラインモード")
@@ -360,14 +670,36 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="AiChatter Server")
-    parser.add_argument("-c", "--character", help="キャラクター設定ファイルのパス")
+    parser.add_argument(
+        "-c",
+        "--character",
+        nargs="+",
+        help=(
+            "デフォルトキャラクターファイルまたはglobパターン。"
+            "例: -c character.yaml / -c 'character*.yaml'"
+        ),
+    )
     args = parser.parse_args()
 
     if args.character:
         import config as _config
         from config import load_character
 
-        _config.character = load_character(args.character)
+        try:
+            default_file, character_dir, character_glob = _resolve_character_cli_values(args.character)
+        except ValueError as e:
+            parser.error(str(e))
+
+        settings.character_file = default_file
+        settings.character_dir = character_dir
+        settings.character_glob = character_glob
+        _config.character = load_character(default_file)
+        logger.info(
+            "起動キャラクター設定: default=%s, dir=%s, glob=%s",
+            settings.character_file,
+            settings.character_dir,
+            settings.character_glob,
+        )
 
     mode = "エコー" if ECHO_MODE else "AI"
     logger.info(f"サーバー起動: {settings.host}:{settings.port} ({mode}モード)")
