@@ -33,8 +33,7 @@ class SubAgentToolAdapter:
     def to_openai_tools(self) -> list[dict]:
         tools: list[dict] = []
         for tool in self._registry.to_openai_tools():
-            fn = tool.get("function", {})
-            name = fn.get("name", "")
+            name = tool.get("name", "")
             if name and self._is_allowed(name):
                 tools.append(tool)
         return tools

@@ -152,8 +152,10 @@ class LocalLLM:
         in_think = False
         pending = ""  # チャンク境界のタグ部分一致を持ち越すバッファ
         raw_content = ""  # デバッグ用: LLM生出力の記録
-        # tool_calls断片を組み立てるためのバッファ
-        tool_calls_buf: dict[str, dict] = {}  # output_index -> {call_id, name, arguments}
+        # 完成したfunction_callを蓄積するリスト
+        tool_calls_list: list[dict] = []
+        # output_item.addedで取得したcall_id/nameをoutput_indexで引くマップ
+        tool_call_meta: dict[int, dict] = {}  # {call_id, name}
 
         async for event in stream:
             event_type = event.type
@@ -180,30 +182,23 @@ class LocalLLM:
 
                         buffer = parts[-1]
 
-            # function_call引数のストリーミング
-            elif event_type == "response.function_call_arguments.delta":
-                idx = event.output_index
-                if idx not in tool_calls_buf:
-                    tool_calls_buf[idx] = {
-                        "call_id": "",
-                        "name": "",
-                        "arguments": "",
-                    }
-                tool_calls_buf[idx]["arguments"] += event.delta
-
-            # function_callアイテム完了
-            elif event_type == "response.output_item.done":
+            # function_callアイテム追加（call_idとnameの早期取得）
+            elif event_type == "response.output_item.added":
                 item = event.item
                 if item.type == "function_call":
-                    idx = event.output_index
-                    if idx not in tool_calls_buf:
-                        tool_calls_buf[idx] = {
-                            "call_id": "",
-                            "name": "",
-                            "arguments": "",
-                        }
-                    tool_calls_buf[idx]["call_id"] = item.call_id
-                    tool_calls_buf[idx]["name"] = item.name
+                    tool_call_meta[event.output_index] = {
+                        "call_id": item.call_id,
+                        "name": item.name,
+                    }
+
+            # function_call引数の確定
+            elif event_type == "response.function_call_arguments.done":
+                meta = tool_call_meta.get(event.output_index, {})
+                tool_calls_list.append({
+                    "call_id": meta.get("call_id", ""),
+                    "name": meta.get("name", "") or getattr(event, "name", ""),
+                    "arguments": event.arguments,
+                })
 
         # pendingに残ったテキストをフラッシュ（タグ未完成＝通常テキスト）
         if pending and not in_think:
@@ -218,19 +213,17 @@ class LocalLLM:
             logger.info(f"LLMラスト: '{buffer.strip()}'")
             yield TextChunk(text=buffer.strip())
 
-        # 組み立て済みtool_callsをyield
-        if tool_calls_buf:
-            for idx in sorted(tool_calls_buf.keys()):
-                entry = tool_calls_buf[idx]
-                # 結合されたJSON ({...}{...}) を分離して個別のツール呼び出しにする
-                split_args = self._split_json_objects(entry["arguments"])
-                for i, args in enumerate(split_args):
-                    tc_id = entry["call_id"] if i == 0 else f"call_{uuid.uuid4().hex[:24]}"
-                    logger.info(
-                        f"ツール呼び出し: {entry['name']}({args})"
-                    )
-                    yield ToolCallRequest(
-                        id=tc_id,
-                        name=entry["name"],
-                        arguments=args,
-                    )
+        # 完成したtool_callsをyield
+        for entry in tool_calls_list:
+            # 結合されたJSON ({...}{...}) を分離して個別のツール呼び出しにする
+            split_args = self._split_json_objects(entry["arguments"])
+            for i, args in enumerate(split_args):
+                tc_id = entry["call_id"] if i == 0 else f"call_{uuid.uuid4().hex[:24]}"
+                logger.info(
+                    f"ツール呼び出し: {entry['name']}({args})"
+                )
+                yield ToolCallRequest(
+                    id=tc_id,
+                    name=entry["name"],
+                    arguments=args,
+                )

@@ -56,6 +56,7 @@ class SubAgentLLM:
         content_parts: list[str] = []
         tool_calls: list[SubAgentToolCall] = []
 
+        logger.debug(f"サブエージェント response.output: {response.output}")
         for item in response.output:
             if item.type == "message":
                 for part in item.content:
