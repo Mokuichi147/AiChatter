@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from config import character_data_path, settings
+from config import character_data_path, llm_config, settings
 from tools import ToolRegistry
 from tools.conversation_memory import DeleteMemoryTool, MemoryStore, SaveMemoryTool, SearchMemoryTool
 from tools.display_control import DisplayImageTool, DisplayTextTool
@@ -22,9 +22,17 @@ class ToolFactory:
     get_pipelines: Callable[[], list]
 
     def __post_init__(self) -> None:
+        embeddings = llm_config.embeddings
         self.memory_store = MemoryStore(
             character_data_path("memory.json"),
             history_file=character_data_path("history.json"),
+            embedding_model=embeddings.model,
+            embedding_base_url=embeddings.base_url or llm_config.base_url,
+            embedding_api_key=embeddings.api_key or llm_config.api_key,
+            embedding_dimensions=embeddings.dimensions,
+            embedding_cache_file="data/.cache/embeddings.json",
+            bm25_weight=embeddings.bm25_weight,
+            embedding_weight=embeddings.embedding_weight,
         )
         self.notification_store = NotificationStore(settings.notification_file)
 

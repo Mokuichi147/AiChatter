@@ -91,12 +91,23 @@ class LlmSubConfig:
 
 
 @dataclass
+class LlmEmbeddingsConfig:
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    dimensions: int = 0
+    bm25_weight: float = 0.65
+    embedding_weight: float = 0.35
+
+
+@dataclass
 class LlmConfig:
     model: str = "gpt-4o"
     base_url: str = ""
     api_key: str = ""
     reasoning: str = ""
     sub: LlmSubConfig = field(default_factory=LlmSubConfig)
+    embeddings: LlmEmbeddingsConfig = field(default_factory=LlmEmbeddingsConfig)
 
 
 def load_llm(yaml_path: str) -> LlmConfig:
@@ -112,12 +123,35 @@ def load_llm(yaml_path: str) -> LlmConfig:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
+    def _to_int(value: object, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _to_float(value: object, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     sub_data = data.get("sub", {})
     sub = LlmSubConfig(
         model=sub_data.get("model", ""),
         base_url=sub_data.get("base_url", ""),
         api_key=sub_data.get("api_key", ""),
         reasoning=sub_data.get("reasoning", ""),
+    )
+    embeddings_data = data.get("embeddings", {})
+    embeddings = LlmEmbeddingsConfig(
+        model=embeddings_data.get("model", ""),
+        base_url=embeddings_data.get("base_url", ""),
+        api_key=embeddings_data.get("api_key", ""),
+        dimensions=_to_int(embeddings_data.get("dimensions", 0), 0),
+        bm25_weight=_to_float(embeddings_data.get("bm25_weight", 0.65), 0.65),
+        embedding_weight=_to_float(
+            embeddings_data.get("embedding_weight", 0.35), 0.35
+        ),
     )
 
     config = LlmConfig(
@@ -126,6 +160,7 @@ def load_llm(yaml_path: str) -> LlmConfig:
         api_key=data.get("api_key", ""),
         reasoning=data.get("reasoning", ""),
         sub=sub,
+        embeddings=embeddings,
     )
     logger.info(f"LLM設定読み込み完了: {config.model} (base_url: {config.base_url or '(default)'})")
     return config

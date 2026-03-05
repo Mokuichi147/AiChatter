@@ -10,3 +10,12 @@ sub:
   base_url: ""
   api_key: ""              # 空ならメインapi_key を使用
   reasoning: ""
+
+# Embeddings API設定 (省略時は無効)
+embeddings:
+  model: ""                # 例: text-embedding-3-small
+  base_url: ""             # 空ならメインbase_url を使用
+  api_key: ""              # 空ならメインapi_key を使用
+  dimensions: 0            # 0なら未指定（モデル既定）
+  bm25_weight: 0.65        # BM25スコア重み
+  embedding_weight: 0.35   # Embeddingスコア重み
