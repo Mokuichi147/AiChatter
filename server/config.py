@@ -83,6 +83,55 @@ def load_character(yaml_path: str) -> CharacterConfig:
 
 
 @dataclass
+class LlmSubConfig:
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    reasoning: str = ""
+
+
+@dataclass
+class LlmConfig:
+    model: str = "gpt-4o"
+    base_url: str = ""
+    api_key: str = ""
+    reasoning: str = ""
+    sub: LlmSubConfig = field(default_factory=LlmSubConfig)
+
+
+def load_llm(yaml_path: str) -> LlmConfig:
+    """YAMLファイルからLLM設定を読み込む。"""
+    path = Path(yaml_path)
+    if not path.is_absolute():
+        path = Path(__file__).parent / path
+
+    if not path.exists():
+        logger.warning(f"LLM設定ファイルが見つかりません: {path}")
+        return LlmConfig()
+
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    sub_data = data.get("sub", {})
+    sub = LlmSubConfig(
+        model=sub_data.get("model", ""),
+        base_url=sub_data.get("base_url", ""),
+        api_key=sub_data.get("api_key", ""),
+        reasoning=sub_data.get("reasoning", ""),
+    )
+
+    config = LlmConfig(
+        model=data.get("model", LlmConfig.model),
+        base_url=data.get("base_url", ""),
+        api_key=data.get("api_key", ""),
+        reasoning=data.get("reasoning", ""),
+        sub=sub,
+    )
+    logger.info(f"LLM設定読み込み完了: {config.model} (base_url: {config.base_url or '(default)'})")
+    return config
+
+
+@dataclass
 class PromptConfig:
     output_rules: str = ""
     tool_guide: str = ""
@@ -116,32 +165,17 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # LLM (OpenAI Responses API)
-    llm_model: str = "gpt-4o"
-    llm_api_key: str = ""
-    llm_base_url: str = ""
-    llm_reasoning: str = ""
-    llm_sub_model: str = ""
-    llm_sub_api_key: str = ""
-    llm_sub_base_url: str = ""
-    llm_sub_reasoning: str = ""
-
     # ASR (mlx-audio Qwen3-ASR)
     asr_model: str = "mlx-community/Qwen3-ASR-0.6B-8bit"
 
-    # システムプロンプト (フォールバック用、character.yamlが優先)
-    system_prompt: str = (
-        "あなたは役立つ日本語アシスタントです。簡潔に、2〜3文で答えてください。"
-    )
-
     # キャラクター設定ファイル
-    character_file: str = "character.yaml"
+    character_file: str = "configs/character.yaml"
     # REST/CLI向けキャラクターカタログ設定
-    character_dir: str = "."
+    character_dir: str = "configs"
     character_glob: str = "character*.yaml"
 
     # プロンプト設定ファイル
-    prompt_file: str = "prompt.yaml"
+    prompt_file: str = "configs/prompt.yaml"
 
     # ツール設定
     tools_enabled: bool = True
@@ -171,6 +205,7 @@ class Settings(BaseSettings):
 settings = Settings()
 character = load_character(settings.character_file)
 prompt_config = load_prompt(settings.prompt_file)
+llm_config = load_llm("configs/llm.yaml")
 
 
 def character_data_path(filename: str) -> str:

@@ -206,7 +206,8 @@ def _run_server(args: argparse.Namespace) -> None:
     mode = "エコー" if ECHO_MODE else "AI"
     logger.info(f"サーバー起動: {settings.host}:{settings.port} ({mode}モード)")
     if not ECHO_MODE:
-        logger.info(f"LLMモデル: {settings.llm_model}")
+        from config import llm_config
+        logger.info(f"LLMモデル: {llm_config.model}")
 
     uvicorn.run(
         app,

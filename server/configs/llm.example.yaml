@@ -1,0 +1,12 @@
+# メインLLM設定
+model: "gpt-4o"
+base_url: "http://localhost:11434/v1"
+api_key: ""                # 空なら "no-key" をフォールバック
+reasoning: ""              # low, medium, high (空=未指定)
+
+# サブエージェントLLM (省略時はメインと同じ)
+sub:
+  model: ""
+  base_url: ""
+  api_key: ""              # 空ならメインapi_key を使用
+  reasoning: ""

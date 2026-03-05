@@ -57,7 +57,7 @@ class ChatEngine:
 
     def _build_system_prompt(self, character_id: str, tool_names: set[str]) -> str:
         entry = self._character_catalog.get(character_id)
-        system_prompt = entry.config.persona.system_prompt or settings.system_prompt
+        system_prompt = entry.config.persona.system_prompt
 
         if prompt_config.output_rules:
             system_prompt += "\n\n" + prompt_config.output_rules.strip()

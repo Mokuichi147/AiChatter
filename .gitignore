@@ -25,12 +25,9 @@ server/data/
 .env
 *.env.local
 
-# キャラクター設定（ユーザーカスタマイズ用）
-server/character*.yaml
-!server/character.example.yaml
-
-# プロンプト設定（ユーザーカスタマイズ用）
-server/prompt.yaml
+# YAML設定（ユーザーカスタマイズ用、exampleのみ追跡）
+server/configs/*.yaml
+!server/configs/*.example.yaml
 
 # OS
 .DS_Store

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from config import settings
+from config import llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,9 @@ class SubAgentLLMResponse:
 
 class SubAgentLLM:
     def __init__(self) -> None:
-        api_key = settings.llm_sub_api_key or settings.llm_api_key or "no-key"
-        base_url = settings.llm_sub_base_url or settings.llm_base_url or None
+        sub = llm_config.sub
+        api_key = sub.api_key or llm_config.api_key or "no-key"
+        base_url = sub.base_url or llm_config.base_url or None
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def complete(
@@ -33,7 +34,8 @@ class SubAgentLLM:
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> SubAgentLLMResponse:
-        model = (settings.llm_sub_model or "").strip() or settings.llm_model
+        sub = llm_config.sub
+        model = sub.model or llm_config.model
         logger.info(f"サブエージェントLLMリクエスト (モデル: {model})")
 
         kwargs: dict = {
@@ -42,7 +44,7 @@ class SubAgentLLM:
             "temperature": 0.3,
             "max_output_tokens": 1200,
         }
-        reasoning = settings.llm_sub_reasoning or settings.llm_reasoning
+        reasoning = sub.reasoning or llm_config.reasoning
         if reasoning:
             kwargs["reasoning"] = {"effort": reasoning}
         if tools:

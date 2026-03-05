@@ -226,7 +226,7 @@ class AudioPipeline:
 
     def _build_system_prompt(self, extra_instruction: str = "") -> str:
         """システムプロンプトを組み立てる。"""
-        system_prompt = config.character.persona.system_prompt or settings.system_prompt
+        system_prompt = config.character.persona.system_prompt
 
         # 共通フォーマット指示を追加
         if prompt_config.output_rules:

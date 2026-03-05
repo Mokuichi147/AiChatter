@@ -7,7 +7,7 @@ from typing import AsyncIterator, Union
 
 from openai import AsyncOpenAI
 
-from config import settings
+from config import llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +29,10 @@ StreamEvent = Union[TextChunk, ToolCallRequest]
 
 class LocalLLM:
     def __init__(self) -> None:
+        api_key = llm_config.api_key or "no-key"
         self._client = AsyncOpenAI(
-            api_key=settings.llm_api_key or "no-key",
-            base_url=settings.llm_base_url or None,
+            api_key=api_key,
+            base_url=llm_config.base_url or None,
         )
         # 文末句読点で分割（TTS単位を小さくして初期応答を早める）
         self._sentence_pattern = re.compile(r"(?<=[。！？\.\!\?])\s*")
@@ -130,17 +131,17 @@ class LocalLLM:
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        logger.info(f"LLMリクエスト (モデル: {settings.llm_model})")
+        logger.info(f"LLMリクエスト (モデル: {llm_config.model})")
 
         kwargs: dict = {
-            "model": settings.llm_model,
+            "model": llm_config.model,
             "input": messages,
             "stream": True,
             "temperature": 0.7,
             "max_output_tokens": 512,
         }
-        if settings.llm_reasoning:
-            kwargs["reasoning"] = {"effort": settings.llm_reasoning}
+        if llm_config.reasoning:
+            kwargs["reasoning"] = {"effort": llm_config.reasoning}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
