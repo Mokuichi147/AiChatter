@@ -93,6 +93,19 @@ class SubAgentJobManager:
             job = self._jobs.get(job_id)
             return job.to_detail_dict() if job else None
 
+    async def get_latest_job(self, status: str = "") -> dict | None:
+        status = status.strip()
+        async with self._lock:
+            jobs = list(self._jobs.values())
+
+        jobs.sort(key=lambda j: j.created_at, reverse=True)
+        if status:
+            jobs = [j for j in jobs if j.status == status]
+
+        if not jobs:
+            return None
+        return jobs[0].to_detail_dict()
+
     async def pop_completed_messages(self, limit: int = 10) -> list[str]:
         messages: list[str] = []
         limit = min(max(1, limit), 100)
@@ -130,8 +143,7 @@ class SubAgentJobManager:
     @staticmethod
     def _build_completion_message(job: SubAgentJob) -> str:
         header = (
-            "[サブエージェント完了]\n"
-            f"job_id: {job.job_id}\n"
+            "[調査完了]\n"
             f"status: {job.status}\n"
             f"goal: {job.request.goal}\n"
         )

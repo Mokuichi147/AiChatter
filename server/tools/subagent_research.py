@@ -10,7 +10,7 @@ class RunSubAgentResearchTool(ToolBase):
     name = "run_subagent_research"
     description = (
         "時間のかかる調査をバックグラウンドジョブとして開始します。"
-        "すぐにjob_idを返し、完了後は get_subagent_job で結果を取得できます。"
+        "進捗は list_subagent_jobs、結果は get_subagent_job で確認できます。"
     )
     input_schema = {
         "type": "object",
@@ -49,13 +49,12 @@ class RunSubAgentResearchTool(ToolBase):
         if priority not in {"low", "normal", "high"}:
             priority = "normal"
 
-        job_id = await self._job_manager.submit_job(
+        await self._job_manager.submit_job(
             SubAgentJobRequest(goal=goal, hints=hints, priority=priority)
         )
         return ToolResult(
             content=(
-                "サブエージェント調査を開始しました。"
-                f"job_id: {job_id}。"
+                "調査を開始しました。"
                 "進捗確認は list_subagent_jobs、結果取得は get_subagent_job を使ってください。"
             )
         )
@@ -63,7 +62,7 @@ class RunSubAgentResearchTool(ToolBase):
 
 class ListSubAgentJobsTool(ToolBase):
     name = "list_subagent_jobs"
-    description = "サブエージェント調査ジョブの一覧を取得します。"
+    description = "調査ジョブの進捗一覧を取得します。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -83,6 +82,11 @@ class ListSubAgentJobsTool(ToolBase):
                 "description": "取得件数 (1-100)",
                 "default": 10,
             },
+            "include_job_id": {
+                "type": "boolean",
+                "description": "内部ID(job_id)を含めるか。既定はfalse。",
+                "default": False,
+            },
         },
     }
 
@@ -92,24 +96,33 @@ class ListSubAgentJobsTool(ToolBase):
     async def execute(self, **kwargs) -> ToolResult:
         status = str(kwargs.get("status", "")).strip()
         limit = kwargs.get("limit", 10)
+        include_job_id = kwargs.get("include_job_id", False)
         try:
             limit = int(limit)
         except (TypeError, ValueError):
             limit = 10
 
+        if isinstance(include_job_id, str):
+            include_job_id = include_job_id.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            include_job_id = bool(include_job_id)
+
         jobs = await self._job_manager.list_jobs(status=status, limit=limit)
         if not jobs:
             return ToolResult(content="該当するサブエージェントジョブはありません。")
 
+        if not include_job_id:
+            jobs = [{k: v for k, v in job.items() if k != "job_id"} for job in jobs]
+
         return ToolResult(
-            content="サブエージェントジョブ一覧:\n"
+            content="調査ジョブ一覧:\n"
             + json.dumps(jobs, ensure_ascii=False, indent=2)
         )
 
 
 class GetSubAgentJobTool(ToolBase):
     name = "get_subagent_job"
-    description = "指定したjob_idのサブエージェント調査ジョブ詳細を取得します。"
+    description = "調査ジョブ詳細を取得します。job_id未指定時は最新ジョブを返します。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -117,8 +130,18 @@ class GetSubAgentJobTool(ToolBase):
                 "type": "string",
                 "description": "取得するジョブID",
             },
+            "selector": {
+                "type": "string",
+                "description": "job_id未指定時の取得対象",
+                "enum": ["latest", "latest_running", "latest_succeeded"],
+                "default": "latest",
+            },
+            "include_job_id": {
+                "type": "boolean",
+                "description": "内部ID(job_id)を結果に含めるか。既定はfalse。",
+                "default": False,
+            },
         },
-        "required": ["job_id"],
     }
 
     def __init__(self, job_manager: SubAgentJobManager) -> None:
@@ -126,14 +149,35 @@ class GetSubAgentJobTool(ToolBase):
 
     async def execute(self, **kwargs) -> ToolResult:
         job_id = str(kwargs.get("job_id", "")).strip()
-        if not job_id:
-            return ToolResult(content="job_idは必須です。", is_error=True)
+        selector = str(kwargs.get("selector", "latest")).strip().lower()
+        include_job_id = kwargs.get("include_job_id", False)
 
-        job = await self._job_manager.get_job(job_id)
+        if isinstance(include_job_id, str):
+            include_job_id = include_job_id.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            include_job_id = bool(include_job_id)
+
+        if job_id:
+            job = await self._job_manager.get_job(job_id)
+        else:
+            status_map = {
+                "latest": "",
+                "latest_running": "running",
+                "latest_succeeded": "succeeded",
+            }
+            if selector not in status_map:
+                selector = "latest"
+            job = await self._job_manager.get_latest_job(status=status_map[selector])
+
         if job is None:
-            return ToolResult(content=f"job_id '{job_id}' は見つかりません。", is_error=True)
+            if job_id:
+                return ToolResult(content="指定したjob_idは見つかりません。", is_error=True)
+            return ToolResult(content="該当する調査ジョブがありません。", is_error=True)
+
+        if not include_job_id:
+            job = {k: v for k, v in job.items() if k != "job_id"}
 
         return ToolResult(
-            content="サブエージェントジョブ詳細:\n"
+            content="調査ジョブ詳細:\n"
             + json.dumps(job, ensure_ascii=False, indent=2)
         )
