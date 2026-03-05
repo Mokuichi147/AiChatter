@@ -300,20 +300,16 @@ class AudioPipeline:
                             await self._synthesize_and_send(event.text)
                 break
 
-            # assistantメッセージ（tool_calls付き）を追加
-            assistant_msg = {"role": "assistant", "content": full_response or None}
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
+            # function_callアイテムをinputに追加
+            for tc in tool_call_requests:
+                messages.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc.id,
                         "name": tc.name,
                         "arguments": tc.arguments,
-                    },
-                }
-                for tc in tool_call_requests
-            ]
-            messages.append(assistant_msg)
+                    }
+                )
 
             # ツール実行
             for tc in tool_call_requests:
@@ -321,9 +317,9 @@ class AudioPipeline:
                 result = await self.tool_registry.execute(tc.name, tc.arguments)
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result.content,
+                        "type": "function_call_output",
+                        "call_id": tc.id,
+                        "output": result.content,
                     }
                 )
 

@@ -167,9 +167,9 @@ class ChatEngine:
             character_id = await self._session_manager.resolve_character_id(session_id)
             tools = self._resolve_openai_tools()
             tool_names = {
-                t.get("function", {}).get("name", "")
+                t.get("name", "")
                 for t in tools
-                if t.get("function", {}).get("name")
+                if t.get("name")
             }
             system_prompt = self._build_system_prompt(character_id, tool_names)
             history = await self._session_manager.get_history(session_id)
@@ -217,19 +217,16 @@ class ChatEngine:
                     full_response = round_text.strip()
                     break
 
-                assistant_msg = {"role": "assistant", "content": round_text or None}
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
+                # function_callアイテムをinputに追加
+                for tc in tool_call_requests:
+                    messages.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tc.id,
                             "name": tc.name,
                             "arguments": tc.arguments,
-                        },
-                    }
-                    for tc in tool_call_requests
-                ]
-                messages.append(assistant_msg)
+                        }
+                    )
 
                 for tc in tool_call_requests:
                     used_tools.append(tc.name)
@@ -243,9 +240,9 @@ class ChatEngine:
 
                     messages.append(
                         {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result.content,
+                            "type": "function_call_output",
+                            "call_id": tc.id,
+                            "output": result.content,
                         }
                     )
                     yield {

@@ -120,23 +120,16 @@ class SubAgentRunner:
             if not response.tool_calls:
                 return self._make_result(response.content, used_tools)
 
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": response.content or None,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments,
-                            },
-                        }
-                        for tc in response.tool_calls
-                    ],
-                }
-            )
+            # function_callアイテムをinputに追加
+            for tc in response.tool_calls:
+                messages.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    }
+                )
 
             for tc in response.tool_calls:
                 used_tools.append(tc.name)
@@ -144,9 +137,9 @@ class SubAgentRunner:
                 tool_content = await self._tool_adapter.execute(tc.name, tc.arguments)
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_content,
+                        "type": "function_call_output",
+                        "call_id": tc.id,
+                        "output": tool_content,
                     }
                 )
 

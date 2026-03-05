@@ -2,7 +2,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-import litellm
+from openai import AsyncOpenAI
 
 from config import settings
 
@@ -24,21 +24,9 @@ class SubAgentLLMResponse:
 
 class SubAgentLLM:
     def __init__(self) -> None:
-        pass
-
-    @staticmethod
-    def _content_to_text(content: object) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            chunks: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    chunks.append(str(item.get("text", "")))
-                else:
-                    chunks.append(str(item))
-            return "\n".join(c for c in chunks if c)
-        return "" if content is None else str(content)
+        api_key = settings.llm_sub_api_key or settings.llm_api_key or "no-key"
+        base_url = settings.llm_sub_base_url or settings.llm_base_url or None
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def complete(
         self,
@@ -50,37 +38,42 @@ class SubAgentLLM:
 
         kwargs: dict = {
             "model": model,
-            "messages": messages,
+            "input": messages,
             "temperature": 0.3,
-            "max_tokens": 1200,
-            "num_ctx": settings.subagent_num_ctx,
+            "max_output_tokens": 1200,
         }
-        if settings.llm_sub_reasoning:
-            kwargs["reasoning_effort"] = settings.llm_sub_reasoning
-            kwargs["drop_params"] = True
+        reasoning = settings.llm_sub_reasoning or settings.llm_reasoning
+        if reasoning:
+            kwargs["reasoning"] = {"effort": reasoning}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        response = await litellm.acompletion(**kwargs)
-        msg = response.choices[0].message
+        response = await self._client.responses.create(**kwargs)
 
+        content_parts: list[str] = []
         tool_calls: list[SubAgentToolCall] = []
-        for tc in msg.tool_calls or []:
-            args = tc.function.arguments
-            if isinstance(args, (dict, list)):
-                arguments = json.dumps(args, ensure_ascii=False)
-            else:
-                arguments = args or "{}"
-            tool_calls.append(
-                SubAgentToolCall(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=arguments,
+
+        for item in response.output:
+            if item.type == "message":
+                for part in item.content:
+                    if part.type == "output_text":
+                        content_parts.append(part.text)
+            elif item.type == "function_call":
+                args = item.arguments
+                if isinstance(args, (dict, list)):
+                    arguments = json.dumps(args, ensure_ascii=False)
+                else:
+                    arguments = args or "{}"
+                tool_calls.append(
+                    SubAgentToolCall(
+                        id=item.call_id,
+                        name=item.name,
+                        arguments=arguments,
+                    )
                 )
-            )
 
         return SubAgentLLMResponse(
-            content=self._content_to_text(msg.content),
+            content="\n".join(content_parts),
             tool_calls=tool_calls,
         )

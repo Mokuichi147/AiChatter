@@ -18,14 +18,12 @@ class ToolBase(ABC):
         ...
 
     def to_openai_tool(self) -> dict:
-        """OpenAI function calling形式に変換する。"""
+        """OpenAI Responses API形式に変換する。"""
         return {
             "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.input_schema,
-            },
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.input_schema,
         }
 
     def to_mcp_tool(self) -> dict:

@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Union
 
-import litellm
+from openai import AsyncOpenAI
 
 from config import settings
 
@@ -29,6 +29,10 @@ StreamEvent = Union[TextChunk, ToolCallRequest]
 
 class LocalLLM:
     def __init__(self) -> None:
+        self._client = AsyncOpenAI(
+            api_key=settings.llm_api_key or "no-key",
+            base_url=settings.llm_base_url or None,
+        )
         # 文末句読点で分割（TTS単位を小さくして初期応答を早める）
         self._sentence_pattern = re.compile(r"(?<=[。！？\.\!\?])\s*")
 
@@ -130,73 +134,75 @@ class LocalLLM:
 
         kwargs: dict = {
             "model": settings.llm_model,
-            "messages": messages,
+            "input": messages,
             "stream": True,
             "temperature": 0.7,
-            "max_tokens": 512,
+            "max_output_tokens": 512,
         }
         if settings.llm_reasoning:
-            val = settings.llm_reasoning.lower()
-            if val in ("true", "false"):
-                kwargs["reasoning_effort"] = val == "true"
-            else:
-                kwargs["reasoning_effort"] = settings.llm_reasoning
-            kwargs["drop_params"] = True
+            kwargs["reasoning"] = {"effort": settings.llm_reasoning}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        stream = await litellm.acompletion(**kwargs)
+        stream = await self._client.responses.create(**kwargs)
 
         buffer = ""
         in_think = False
         pending = ""  # チャンク境界のタグ部分一致を持ち越すバッファ
         raw_content = ""  # デバッグ用: LLM生出力の記録
         # tool_calls断片を組み立てるためのバッファ
-        tool_calls_buf: dict[int, dict] = {}
+        tool_calls_buf: dict[str, dict] = {}  # output_index -> {call_id, name, arguments}
 
-        async for chunk in stream:
-            choice = chunk.choices[0]
-            delta = choice.delta
+        async for event in stream:
+            event_type = event.type
 
             # テキスト応答の処理
-            if delta.content:
-                raw_content += delta.content
-                text = pending + delta.content
-                clean, in_think, pending = self._strip_think_tags(
-                    text, in_think
-                )
-                if clean:
-                    buffer += clean
+            if event_type == "response.output_text.delta":
+                delta_text = event.delta
+                if delta_text:
+                    raw_content += delta_text
+                    text = pending + delta_text
+                    clean, in_think, pending = self._strip_think_tags(
+                        text, in_think
+                    )
+                    if clean:
+                        buffer += clean
 
-                if buffer and not in_think:
-                    parts = self._sentence_pattern.split(buffer)
-                    for sentence in parts[:-1]:
-                        sentence = sentence.strip()
-                        if sentence:
-                            logger.debug(f"LLMチャンク: '{sentence}'")
-                            yield TextChunk(text=sentence)
+                    if buffer and not in_think:
+                        parts = self._sentence_pattern.split(buffer)
+                        for sentence in parts[:-1]:
+                            sentence = sentence.strip()
+                            if sentence:
+                                logger.debug(f"LLMチャンク: '{sentence}'")
+                                yield TextChunk(text=sentence)
 
-                    buffer = parts[-1]
+                        buffer = parts[-1]
 
-            # tool_calls断片の組み立て
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
+            # function_call引数のストリーミング
+            elif event_type == "response.function_call_arguments.delta":
+                idx = event.output_index
+                if idx not in tool_calls_buf:
+                    tool_calls_buf[idx] = {
+                        "call_id": "",
+                        "name": "",
+                        "arguments": "",
+                    }
+                tool_calls_buf[idx]["arguments"] += event.delta
+
+            # function_callアイテム完了
+            elif event_type == "response.output_item.done":
+                item = event.item
+                if item.type == "function_call":
+                    idx = event.output_index
                     if idx not in tool_calls_buf:
                         tool_calls_buf[idx] = {
-                            "id": "",
+                            "call_id": "",
                             "name": "",
                             "arguments": "",
                         }
-                    entry = tool_calls_buf[idx]
-                    if tc_delta.id:
-                        entry["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            entry["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            entry["arguments"] += tc_delta.function.arguments
+                    tool_calls_buf[idx]["call_id"] = item.call_id
+                    tool_calls_buf[idx]["name"] = item.name
 
         # pendingに残ったテキストをフラッシュ（タグ未完成＝通常テキスト）
         if pending and not in_think:
@@ -212,14 +218,13 @@ class LocalLLM:
             yield TextChunk(text=buffer.strip())
 
         # 組み立て済みtool_callsをyield
-        # (finish_reasonが"tool_calls"以外でも対応するためストリーム終了後に処理)
         if tool_calls_buf:
             for idx in sorted(tool_calls_buf.keys()):
                 entry = tool_calls_buf[idx]
                 # 結合されたJSON ({...}{...}) を分離して個別のツール呼び出しにする
                 split_args = self._split_json_objects(entry["arguments"])
                 for i, args in enumerate(split_args):
-                    tc_id = entry["id"] if i == 0 else f"call_{uuid.uuid4().hex[:24]}"
+                    tc_id = entry["call_id"] if i == 0 else f"call_{uuid.uuid4().hex[:24]}"
                     logger.info(
                         f"ツール呼び出し: {entry['name']}({args})"
                     )

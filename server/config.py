@@ -116,10 +116,14 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # LLM (LiteLLM)
-    llm_model: str = "ollama_chat/glm-5:cloud"
+    # LLM (OpenAI Responses API)
+    llm_model: str = "gpt-4o"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
     llm_reasoning: str = ""
     llm_sub_model: str = ""
+    llm_sub_api_key: str = ""
+    llm_sub_base_url: str = ""
     llm_sub_reasoning: str = ""
 
     # ASR (mlx-audio Qwen3-ASR)
