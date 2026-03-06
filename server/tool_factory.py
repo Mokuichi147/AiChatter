@@ -23,6 +23,7 @@ class ToolFactory:
 
     def __post_init__(self) -> None:
         embeddings = llm_config.embeddings
+        rerank = llm_config.rerank
         self.memory_store = MemoryStore(
             character_data_path("memory.json"),
             history_file=character_data_path("history.json"),
@@ -33,6 +34,11 @@ class ToolFactory:
             embedding_cache_file="data/.cache/embeddings.json",
             bm25_weight=embeddings.bm25_weight,
             embedding_weight=embeddings.embedding_weight,
+            rerank_weight=embeddings.rerank_weight,
+            rerank_model=rerank.model,
+            rerank_base_url=rerank.base_url or llm_config.base_url,
+            rerank_api_key=rerank.api_key or llm_config.api_key,
+            rerank_top_n=rerank.top_n,
         )
         self.notification_store = NotificationStore(settings.notification_file)
 

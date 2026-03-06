@@ -96,8 +96,17 @@ class LlmEmbeddingsConfig:
     base_url: str = ""
     api_key: str = ""
     dimensions: int = 0
-    bm25_weight: float = 0.65
-    embedding_weight: float = 0.35
+    bm25_weight: float = 0.4
+    embedding_weight: float = 0.3
+    rerank_weight: float = 0.3
+
+
+@dataclass
+class LlmRerankConfig:
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    top_n: int = 20
 
 
 @dataclass
@@ -108,6 +117,7 @@ class LlmConfig:
     reasoning: str = ""
     sub: LlmSubConfig = field(default_factory=LlmSubConfig)
     embeddings: LlmEmbeddingsConfig = field(default_factory=LlmEmbeddingsConfig)
+    rerank: LlmRerankConfig = field(default_factory=LlmRerankConfig)
 
 
 def load_llm(yaml_path: str) -> LlmConfig:
@@ -148,10 +158,20 @@ def load_llm(yaml_path: str) -> LlmConfig:
         base_url=embeddings_data.get("base_url", ""),
         api_key=embeddings_data.get("api_key", ""),
         dimensions=_to_int(embeddings_data.get("dimensions", 0), 0),
-        bm25_weight=_to_float(embeddings_data.get("bm25_weight", 0.65), 0.65),
+        bm25_weight=_to_float(embeddings_data.get("bm25_weight", 0.4), 0.4),
         embedding_weight=_to_float(
-            embeddings_data.get("embedding_weight", 0.35), 0.35
+            embeddings_data.get("embedding_weight", 0.3), 0.3
         ),
+        rerank_weight=_to_float(
+            embeddings_data.get("rerank_weight", 0.3), 0.3
+        ),
+    )
+    rerank_data = data.get("rerank", {})
+    rerank = LlmRerankConfig(
+        model=rerank_data.get("model", ""),
+        base_url=rerank_data.get("base_url", ""),
+        api_key=rerank_data.get("api_key", ""),
+        top_n=_to_int(rerank_data.get("top_n", 20), 20),
     )
 
     config = LlmConfig(
@@ -161,6 +181,7 @@ def load_llm(yaml_path: str) -> LlmConfig:
         reasoning=data.get("reasoning", ""),
         sub=sub,
         embeddings=embeddings,
+        rerank=rerank,
     )
     logger.info(f"LLM設定読み込み完了: {config.model} (base_url: {config.base_url or '(default)'})")
     return config

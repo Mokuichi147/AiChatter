@@ -17,5 +17,14 @@ embeddings:
   base_url: ""             # 空ならメインbase_url を使用
   api_key: ""              # 空ならメインapi_key を使用
   dimensions: 0            # 0なら未指定（モデル既定）
-  bm25_weight: 0.65        # BM25スコア重み
-  embedding_weight: 0.35   # Embeddingスコア重み
+  bm25_weight: 0.4         # BM25スコア重み
+  embedding_weight: 0.3    # Embeddingスコア重み
+  rerank_weight: 0.3       # リランキングスコア重み
+
+# Rerank API設定 (省略時は無効)
+# POST /v1/rerank エンドポイントを使用 (Jina, Cohere, vLLM等)
+rerank:
+  model: ""                # 例: jina-reranker-v2-base-multilingual
+  base_url: ""             # 空ならメインbase_url を使用
+  api_key: ""              # 空ならメインapi_key を使用
+  top_n: 20                # リランキング対象の最大件数

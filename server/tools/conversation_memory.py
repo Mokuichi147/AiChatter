@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import numpy as np
 from openai import AsyncOpenAI
 from rank_bm25 import BM25Okapi
@@ -27,8 +28,13 @@ class MemoryStore:
         embedding_api_key: str = "",
         embedding_dimensions: int = 0,
         embedding_cache_file: str = "",
-        bm25_weight: float = 0.65,
-        embedding_weight: float = 0.35,
+        bm25_weight: float = 0.4,
+        embedding_weight: float = 0.3,
+        rerank_weight: float = 0.3,
+        rerank_model: str = "",
+        rerank_base_url: str = "",
+        rerank_api_key: str = "",
+        rerank_top_n: int = 20,
     ) -> None:
         self._path = Path(file_path)
         if not self._path.is_absolute():
@@ -49,6 +55,7 @@ class MemoryStore:
         self._embedding_dimensions = max(0, int(embedding_dimensions))
         self._bm25_weight = max(0.0, float(bm25_weight))
         self._embedding_weight = max(0.0, float(embedding_weight))
+        self._rerank_weight = max(0.0, float(rerank_weight))
         self._embedding_client: AsyncOpenAI | None = None
         self._embedding_cache: dict[str, list[float]] = {}
         if self._embedding_model:
@@ -57,6 +64,10 @@ class MemoryStore:
                 base_url=embedding_base_url or None,
             )
             self._load_embedding_cache()
+        self._rerank_model = rerank_model.strip()
+        self._rerank_base_url = rerank_base_url.strip().rstrip("/")
+        self._rerank_api_key = rerank_api_key.strip()
+        self._rerank_top_n = max(1, int(rerank_top_n))
         self._data: dict[str, dict] = {}
         self._load()
 
@@ -270,6 +281,44 @@ class MemoryStore:
             similarities.append(sim)
         return similarities
 
+    async def _rerank_scores(
+        self, query: str, documents: list[str],
+    ) -> list[float]:
+        if not self._rerank_model or not self._rerank_base_url or not documents:
+            return [0.0] * len(documents)
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._rerank_api_key:
+            headers["Authorization"] = f"Bearer {self._rerank_api_key}"
+
+        payload = {
+            "model": self._rerank_model,
+            "query": query,
+            "documents": documents,
+            "top_n": min(self._rerank_top_n, len(documents)),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._rerank_base_url}/v1/rerank",
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            logger.warning(f"リランキングをスキップします: {e}")
+            return [0.0] * len(documents)
+
+        scores = [0.0] * len(documents)
+        for item in data.get("results", []):
+            idx = item.get("index")
+            score = item.get("relevance_score", 0.0)
+            if isinstance(idx, int) and 0 <= idx < len(documents):
+                scores[idx] = float(score)
+        return scores
+
     def _collect_candidates(
         self, after_dt: datetime | None, before_dt: datetime | None, include_auto: bool,
     ) -> list[tuple[str, dict]]:
@@ -341,26 +390,35 @@ class MemoryStore:
         embedding_raw_scores = await self._embedding_similarity_scores(query, texts)
         embedding_norm_scores = self._normalize_scores(embedding_raw_scores)
 
+        rerank_raw_scores = await self._rerank_scores(query, texts)
+        rerank_norm_scores = self._normalize_scores(rerank_raw_scores)
+
         use_embedding = self._embedding_client is not None and any(
             s > 0 for s in embedding_norm_scores
         )
-        if use_embedding:
-            total_weight = self._bm25_weight + self._embedding_weight
-            if total_weight <= 0:
-                bm25_weight = 1.0
-                embedding_weight = 0.0
-            else:
-                bm25_weight = self._bm25_weight / total_weight
-                embedding_weight = self._embedding_weight / total_weight
+        use_rerank = self._rerank_model and any(
+            s > 0 for s in rerank_norm_scores
+        )
+
+        w_bm25 = self._bm25_weight
+        w_emb = self._embedding_weight if use_embedding else 0.0
+        w_rerank = self._rerank_weight if use_rerank else 0.0
+        total_weight = w_bm25 + w_emb + w_rerank
+        if total_weight <= 0:
+            w_bm25 = 1.0
+            w_emb = 0.0
+            w_rerank = 0.0
         else:
-            bm25_weight = 1.0
-            embedding_weight = 0.0
+            w_bm25 /= total_weight
+            w_emb /= total_weight
+            w_rerank /= total_weight
 
         results = []
         for i, (key, entry) in enumerate(candidates):
             score = (
-                bm25_norm_scores[i] * bm25_weight
-                + embedding_norm_scores[i] * embedding_weight
+                bm25_norm_scores[i] * w_bm25
+                + embedding_norm_scores[i] * w_emb
+                + rerank_norm_scores[i] * w_rerank
             )
             content = entry.get("content", "")
             if score > 0:
