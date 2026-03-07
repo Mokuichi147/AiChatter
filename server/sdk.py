@@ -44,13 +44,14 @@ class AiChatterRuntime:
             max_messages=opts.max_history_messages,
         )
 
-        tool_registry = _build_tool_registry() if opts.enable_tools else None
+        tool_registry, skill_provider = _build_tools() if opts.enable_tools else (None, None)
         llm = LocalLLM()
         engine = ChatEngine(
             llm=llm,
             session_manager=session_manager,
             character_catalog=catalog,
             tool_registry=tool_registry,
+            skill_provider=skill_provider,
         )
         return cls(engine=engine, catalog=catalog, session_manager=session_manager)
 
@@ -89,6 +90,6 @@ async def create_runtime(options: AiChatterOptions | None = None) -> AiChatterRu
     return await AiChatterRuntime.create(options)
 
 
-def _build_tool_registry():
+def _build_tools():
     factory = ToolFactory(tts=None, get_pipelines=lambda: [])
-    return factory.create_registry(set())
+    return factory.create_registry(set()), factory.skill_provider

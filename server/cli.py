@@ -58,9 +58,9 @@ def _resolve_character(catalog: CharacterCatalog, value: str | None) -> str:
         print("入力が不正です。もう一度入力してください。")
 
 
-def _build_tool_registry():
+def _build_tools():
     factory = ToolFactory(tts=None, get_pipelines=lambda: [])
-    return factory.create_registry(set())
+    return factory.create_registry(set()), factory.skill_provider
 
 
 def _apply_server_character_selection(values: list[str] | None) -> None:
@@ -148,7 +148,7 @@ async def _run_chat(args: argparse.Namespace) -> None:
         )
 
     llm = LocalLLM()
-    tool_registry = _build_tool_registry()
+    tool_registry, skill_provider = _build_tools()
     session_manager = SessionManager(
         default_character_id=character_id,
         default_history_mode=history_mode,
@@ -159,6 +159,7 @@ async def _run_chat(args: argparse.Namespace) -> None:
         session_manager=session_manager,
         character_catalog=catalog,
         tool_registry=tool_registry,
+        skill_provider=skill_provider,
     )
 
     session_id = args.session_id or "cli"

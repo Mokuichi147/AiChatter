@@ -9,6 +9,7 @@ from character_catalog import CharacterCatalog
 from config import prompt_config, settings
 from local_llm import LocalLLM, TextChunk, ToolCallRequest
 from session_manager import SessionManager
+from skills import SkillProvider
 from tools.base import ToolResult
 from tools.registry import ToolRegistry
 
@@ -24,11 +25,13 @@ class ChatEngine:
         session_manager: SessionManager,
         character_catalog: CharacterCatalog,
         tool_registry: ToolRegistry | None = None,
+        skill_provider: SkillProvider | None = None,
     ) -> None:
         self._llm = llm
         self._session_manager = session_manager
         self._character_catalog = character_catalog
         self._tool_registry = tool_registry
+        self._skill_provider = skill_provider
 
     def _resolve_openai_tools(self) -> list[dict]:
         if (
@@ -39,23 +42,9 @@ class ChatEngine:
             return []
         return self._tool_registry.to_openai_tools()
 
-    @staticmethod
-    def _filter_tool_guide_by_tools(guide: str, tool_names: set[str]) -> str:
-        guide = (guide or "").strip()
-        if not guide:
-            return ""
-
-        lines = []
-        for line in guide.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("- ") and ":" in stripped:
-                maybe_name = stripped[2:].split(":", 1)[0].strip()
-                if maybe_name and maybe_name not in tool_names:
-                    continue
-            lines.append(line)
-        return "\n".join(lines).strip()
-
-    def _build_system_prompt(self, character_id: str, tool_names: set[str]) -> str:
+    def _build_system_prompt(
+        self, character_id: str, skill_context: str = "",
+    ) -> str:
         entry = self._character_catalog.get(character_id)
         system_prompt = entry.config.persona.system_prompt
 
@@ -63,14 +52,17 @@ class ChatEngine:
             system_prompt += "\n\n" + prompt_config.output_rules.strip()
 
         if (
-            self._tool_registry
+            self._skill_provider
+            and self._tool_registry
             and not self._tool_registry.is_empty
             and settings.tools_enabled
-            and prompt_config.tool_guide
         ):
-            tool_guide = self._filter_tool_guide_by_tools(prompt_config.tool_guide, tool_names)
-            if tool_guide:
-                system_prompt += "\n\n" + tool_guide
+            base = self._skill_provider.tool_guide_base
+            if base:
+                system_prompt += "\n\n" + base
+
+        if skill_context:
+            system_prompt += "\n\n" + skill_context
 
         now = datetime.now()
         return system_prompt.replace("{{DATETIME}}", now.strftime("%Y年%m月%d日 %H:%M"))
@@ -171,7 +163,14 @@ class ChatEngine:
                 for t in tools
                 if t.get("name")
             }
-            system_prompt = self._build_system_prompt(character_id, tool_names)
+
+            skill_context = ""
+            if self._skill_provider:
+                skill_context = await self._skill_provider.retrieve(
+                    text, available_tools=tool_names or None,
+                )
+
+            system_prompt = self._build_system_prompt(character_id, skill_context)
             history = await self._session_manager.get_history(session_id)
 
             messages = [{"role": "system", "content": system_prompt}]

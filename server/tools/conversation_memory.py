@@ -319,6 +319,11 @@ class MemoryStore:
                 scores[idx] = float(score)
         return scores
 
+    async def embedding_similarity(
+        self, query: str, documents: list[str],
+    ) -> list[float]:
+        return await self._embedding_similarity_scores(query, documents)
+
     def _collect_candidates(
         self, after_dt: datetime | None, before_dt: datetime | None, include_auto: bool,
     ) -> list[tuple[str, dict]]:

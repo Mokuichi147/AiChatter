@@ -13,6 +13,7 @@ from local_llm import LocalLLM, TextChunk, ToolCallRequest
 from local_tts import LocalTTS
 import config
 from config import character_data_path, prompt_config, settings
+from skills import SkillProvider
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +52,14 @@ class AudioPipeline:
         llm: LocalLLM,
         tts: LocalTTS,
         tool_registry=None,
-        memory_store=None,
+        skill_provider: SkillProvider | None = None,
     ) -> None:
         self.send_fn = send_fn
         self.asr = asr
         self.llm = llm
         self.tts = tts
         self.tool_registry = tool_registry
-        self.memory_store = memory_store
+        self.skill_provider = skill_provider
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
@@ -224,7 +225,9 @@ class AudioPipeline:
                         return
                     offset += MAX_CHUNK
 
-    def _build_system_prompt(self, extra_instruction: str = "") -> str:
+    def _build_system_prompt(
+        self, skill_context: str = "", extra_instruction: str = "",
+    ) -> str:
         """システムプロンプトを組み立てる。"""
         system_prompt = config.character.persona.system_prompt
 
@@ -232,13 +235,19 @@ class AudioPipeline:
         if prompt_config.output_rules:
             system_prompt += "\n\n" + prompt_config.output_rules.strip()
 
-        # ツール有効時はツール使用ガイドを追加
+        # ツール有効時はツール使用ガイドのベース部分を追加
         if (
-            self.tool_registry
+            self.skill_provider
+            and self.tool_registry
             and not self.tool_registry.is_empty
             and settings.tools_enabled
         ):
-            system_prompt += "\n\n" + prompt_config.tool_guide.strip()
+            base = self.skill_provider.tool_guide_base
+            if base:
+                system_prompt += "\n\n" + base
+
+        if skill_context:
+            system_prompt += "\n\n" + skill_context
 
         if extra_instruction:
             system_prompt += "\n\n" + extra_instruction
@@ -377,8 +386,11 @@ class AudioPipeline:
             logger.info(f"ASR認識: '{text}'")
 
             async with self._pipeline_lock:
-                # --- メッセージ組み立て ---
-                system_prompt = self._build_system_prompt()
+                # --- スキル検索 + メッセージ組み立て ---
+                skill_context = ""
+                if self.skill_provider:
+                    skill_context = await self.skill_provider.retrieve(text)
+                system_prompt = self._build_system_prompt(skill_context)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(
                     {
@@ -508,7 +520,10 @@ class AudioPipeline:
 
             async with self._pipeline_lock:
                 instruction = f"[通知] {text} — ユーザーはこの結果を待っています。内容を要約してキャラクターらしく必ず伝えてください。"
-                system_prompt = self._build_system_prompt()
+                skill_context = ""
+                if self.skill_provider:
+                    skill_context = await self.skill_provider.retrieve(instruction)
+                system_prompt = self._build_system_prompt(skill_context)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(
                     {

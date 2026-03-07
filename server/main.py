@@ -52,6 +52,7 @@ _tool_registry_ws = None
 _tool_registry_api = None
 _notification_store = None
 _memory_store = None
+_skill_provider = None
 _subagent_job_manager = None
 _scheduler_tasks: list[asyncio.Task] = []
 
@@ -236,7 +237,7 @@ async def _subagent_result_scheduler() -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     global _asr, _llm, _tts, _tool_factory, _tool_registry_ws, _tool_registry_api
-    global _notification_store, _memory_store
+    global _notification_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
     # キャラクターカタログ初期化（REST/CLI共通）
@@ -294,6 +295,7 @@ async def startup_event() -> None:
             _tool_registry_api = _tool_factory.create_registry(set())
             _memory_store = _tool_factory.memory_store
             _notification_store = _tool_factory.notification_store
+            _skill_provider = _tool_factory.skill_provider
 
             if settings.subagent_enabled:
                 from subagent.job_manager import SubAgentJobManager
@@ -333,6 +335,7 @@ async def startup_event() -> None:
             session_manager=_session_manager,
             character_catalog=_character_catalog,
             tool_registry=_tool_registry_api,
+            skill_provider=_skill_provider,
         )
 
         # 通知スケジューラー起動
@@ -347,7 +350,7 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     global _asr, _llm, _tts, _tool_factory, _tool_registry_ws, _tool_registry_api
-    global _notification_store, _memory_store
+    global _notification_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
     logger.info("シャットダウン処理開始")
@@ -380,6 +383,7 @@ async def shutdown_event() -> None:
     _subagent_job_manager = None
     _notification_store = None
     _memory_store = None
+    _skill_provider = None
     _tool_registry_ws = None
     _tool_registry_api = None
     _tool_factory = None
@@ -587,7 +591,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await websocket.send_bytes(data)
 
             pipeline = AudioPipeline(
-                send_fn, _asr, _llm, _tts, _tool_registry_ws, _memory_store
+                send_fn, _asr, _llm, _tts, _tool_registry_ws, _skill_provider
             )
             _active_pipelines.append(pipeline)
             await pipeline.send_wake()

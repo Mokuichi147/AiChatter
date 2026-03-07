@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from config import character_data_path, llm_config, settings
+from config import character_data_path, llm_config, prompt_config, settings
+from skills import SkillProvider
 from tools import ToolRegistry
 from tools.conversation_memory import DeleteMemoryTool, MemoryStore, SaveMemoryTool, SearchMemoryTool
 from tools.display_control import DisplayImageTool, DisplayTextTool
@@ -41,6 +42,10 @@ class ToolFactory:
             rerank_top_n=rerank.top_n,
         )
         self.notification_store = NotificationStore(settings.notification_file)
+        self.skill_provider = SkillProvider(
+            memory_store=self.memory_store,
+            tool_guide=prompt_config.tool_guide,
+        )
 
     def create_registry(self, capabilities: set[str] | None = None) -> ToolRegistry:
         caps = capabilities or set()
