@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterator
 
 import numpy as np
+from sudachipy import Dictionary, SplitMode
 
 import config
 
@@ -28,6 +29,24 @@ _SPEAKABLE_RE = re.compile(
     r"a-zA-Zａ-ｚＡ-Ｚ0-9０-９"
     r"、。！？,.!?ー〜…―\-\s]"
 )
+
+
+_sudachi_tokenizer = Dictionary().create()
+_KANJI_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF]")
+
+
+def _to_reading(text: str) -> str:
+    """漢字を含むトークンをカタカナの読みに変換する。"""
+    morphemes = _sudachi_tokenizer.tokenize(text, SplitMode.C)
+    parts: list[str] = []
+    for m in morphemes:
+        surface = m.surface()
+        if _KANJI_RE.search(surface):
+            reading = m.reading_form()
+            parts.append(reading if reading else surface)
+        else:
+            parts.append(surface)
+    return "".join(parts)
 
 
 class LocalTTS:
@@ -147,6 +166,10 @@ class LocalTTS:
         """バッチTTS: 全音声を結合→一括リサンプル→PCM変換"""
         # 絵文字等TTS不可文字を除去
         text = _SPEAKABLE_RE.sub("", text).strip()
+        if not text:
+            return
+        # 漢字を読みに変換（読み間違い防止）
+        text = _to_reading(text)
         if not text:
             return
         # 句読点・記号のみで発音可能文字がない場合はスキップ
