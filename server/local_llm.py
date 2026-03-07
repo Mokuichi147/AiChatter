@@ -35,7 +35,7 @@ class LocalLLM:
             base_url=llm_config.base_url or None,
         )
         # 文末句読点で分割（TTS単位を小さくして初期応答を早める）
-        self._sentence_pattern = re.compile(r"(?<=[。！？\.\!\?])\s*")
+        self._sentence_pattern = re.compile(r"(?<=[。！？!?])\s*|(?<=[^0-9]\.)\s*")
 
     @staticmethod
     def _strip_think_tags(
