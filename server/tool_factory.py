@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Callable
 
 from config import character_data_path, llm_config, prompt_config, settings
 from skills import SkillProvider
@@ -12,6 +12,9 @@ from tools.notification import DeleteNotificationTool, ListNotificationsTool, No
 from tools.search import SearchTool
 from tools.sleep_control import SetSleepTool
 
+if TYPE_CHECKING:
+    from speaker_id import SpeakerIdentifier
+
 CAP_M5_DEVICE = "m5_device"
 
 
@@ -21,6 +24,7 @@ class ToolFactory:
 
     tts: object | None
     get_pipelines: Callable[[], list]
+    speaker_id: SpeakerIdentifier | None = None
 
     def __post_init__(self) -> None:
         embeddings = llm_config.embeddings
@@ -71,6 +75,20 @@ class ToolFactory:
             registry.register(SetSleepTool(self.get_pipelines))
             registry.register(DisplayTextTool(self.get_pipelines))
             registry.register(DisplayImageTool(self.get_pipelines))
+
+        # グループモード: 話者識別ツール
+        if self.speaker_id is not None and settings.conversation_mode == "group":
+            from tools.speaker_registration import (
+                ListSpeakersTool,
+                MergeSpeakersTool,
+                RegisterSpeakerTool,
+                UnregisterSpeakerTool,
+            )
+
+            registry.register(RegisterSpeakerTool(self.speaker_id, self.get_pipelines))
+            registry.register(ListSpeakersTool(self.speaker_id))
+            registry.register(UnregisterSpeakerTool(self.speaker_id))
+            registry.register(MergeSpeakersTool(self.speaker_id, self.get_pipelines))
 
         return registry
 

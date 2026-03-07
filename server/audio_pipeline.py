@@ -4,6 +4,7 @@ import logging
 import struct
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, ClassVar, Optional
@@ -14,6 +15,7 @@ from local_tts import LocalTTS
 import config
 from config import character_data_path, prompt_config, settings
 from skills import SkillProvider
+from speaker_id import SpeakerIdentifier
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class AudioPipeline:
         tts: LocalTTS,
         tool_registry=None,
         skill_provider: SkillProvider | None = None,
+        speaker_id: SpeakerIdentifier | None = None,
     ) -> None:
         self.send_fn = send_fn
         self.asr = asr
@@ -60,6 +63,7 @@ class AudioPipeline:
         self.tts = tts
         self.tool_registry = tool_registry
         self.skill_provider = skill_provider
+        self.speaker_id = speaker_id
 
         self._audio_buffer = bytearray()
         self._seq: int = 0
@@ -70,6 +74,7 @@ class AudioPipeline:
         self._device_sleeping: bool = False
         self._sleep_after_tts: bool = False
         self._ws_closed: bool = False
+        self._current_audio_data: Optional[bytes] = None
 
     @staticmethod
     def _history_path() -> Path:
@@ -244,6 +249,13 @@ class AudioPipeline:
         ):
             system_prompt += "\n\n" + prompt_config.tool_guide_base.strip()
 
+        # グループモード時にgroup_rulesを注入
+        if (
+            settings.conversation_mode == "group"
+            and prompt_config.group_rules
+        ):
+            system_prompt += "\n\n" + prompt_config.group_rules.strip()
+
         if skill_context:
             system_prompt += "\n\n" + skill_context
 
@@ -259,7 +271,11 @@ class AudioPipeline:
         return system_prompt
 
     async def _process_llm_and_tts(
-        self, messages: list[dict], user_text: str
+        self,
+        messages: list[dict],
+        user_text: str,
+        speaker: str | None = None,
+        speaker_embedding: list[float] | None = None,
     ) -> None:
         """LLMストリーミング → TTS合成 → 送信 → 履歴更新。"""
         # ツール設定
@@ -271,11 +287,18 @@ class AudioPipeline:
         ):
             tools = self.tool_registry.to_openai_tools()
 
+        is_group = settings.conversation_mode == "group"
+
         # --- LLM + TTS ストリーミング (ツール実行ループ) ---
         full_response = ""
+        skipped = False
 
         for round_num in range(MAX_TOOL_ROUNDS):
             tool_call_requests: list[ToolCallRequest] = []
+
+            # グループモード: SKIP判定用バッファ
+            skip_buffer = ""
+            skip_checked = False
 
             async for event in self.llm.generate_stream(messages, tools):
                 if self._interrupted or self._ws_closed:
@@ -283,13 +306,40 @@ class AudioPipeline:
                     break
 
                 if isinstance(event, TextChunk):
-                    full_response += event.text
-                    logger.info(f"TTS合成: '{event.text}'")
-                    await self._synthesize_and_send(event.text)
+                    if is_group and not skip_checked:
+                        # 最初の出力をバッファリングしてSKIP判定
+                        skip_buffer += event.text
+                        if len(skip_buffer) >= 6:
+                            skip_checked = True
+                            if skip_buffer.strip().startswith("[SKIP]"):
+                                skipped = True
+                                logger.info("グループモード: SKIP判定 → TTS合成スキップ")
+                                break
+                            else:
+                                # バッファ内容をTTSに流す
+                                full_response += skip_buffer
+                                logger.info(f"TTS合成: '{skip_buffer}'")
+                                await self._synthesize_and_send(skip_buffer)
+                    else:
+                        if not skipped:
+                            full_response += event.text
+                            logger.info(f"TTS合成: '{event.text}'")
+                            await self._synthesize_and_send(event.text)
                 elif isinstance(event, ToolCallRequest):
                     tool_call_requests.append(event)
 
-            if self._interrupted or self._ws_closed:
+            # バッファが6文字未満でストリーム終了した場合のSKIP判定
+            if is_group and not skip_checked and skip_buffer:
+                skip_checked = True
+                if skip_buffer.strip().startswith("[SKIP]"):
+                    skipped = True
+                    logger.info("グループモード: SKIP判定 → TTS合成スキップ")
+                elif not skipped:
+                    full_response += skip_buffer
+                    logger.info(f"TTS合成: '{skip_buffer}'")
+                    await self._synthesize_and_send(skip_buffer)
+
+            if self._interrupted or self._ws_closed or skipped:
                 break
 
             # ツール呼び出しがなければ終了
@@ -345,10 +395,23 @@ class AudioPipeline:
                 await self._send_sleep_now()
 
             # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
-            if full_response:
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                user_entry = {"role": "user", "content": user_text, "created_at": now_str}
-                assistant_entry = {"role": "assistant", "content": full_response, "created_at": now_str}
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            user_entry: dict = {"role": "user", "content": user_text, "created_at": now_str}
+            if is_group and speaker:
+                user_entry["speaker"] = speaker
+            if is_group and speaker_embedding and self.speaker_id:
+                uid = uuid.uuid4().hex
+                user_entry["utterance_id"] = uid
+                self.speaker_id.store_utterance_embedding(uid, speaker_embedding)
+
+            if skipped:
+                # SKIP時はユーザー発言のみ記録（文脈維持のため）
+                self._history.append(user_entry)
+                if len(self._history) > 20:
+                    self._history = self._history[-20:]
+                self._save_history([user_entry])
+            elif full_response:
+                assistant_entry: dict = {"role": "assistant", "content": full_response, "created_at": now_str}
                 self._history.append(user_entry)
                 self._history.append(assistant_entry)
                 # メモリ上は直近分のみ保持、ファイルには全件蓄積
@@ -383,6 +446,23 @@ class AudioPipeline:
 
             logger.info(f"ASR認識: '{text}'")
 
+            # --- グループモード: 話者識別 ---
+            speaker_name = None
+            speaker_embedding = None
+            if self.speaker_id and settings.conversation_mode == "group":
+                self._current_audio_data = audio_data
+
+                identified, score = await loop.run_in_executor(
+                    None, lambda: self.speaker_id.identify(audio_data)
+                )
+                speaker_name = identified
+                logger.info(f"話者識別: {identified} (score={score:.3f})")
+
+                # embedding を保存用に計算
+                speaker_embedding = await loop.run_in_executor(
+                    None, lambda: self.speaker_id.compute_embedding(audio_data).tolist()
+                )
+
             async with self._pipeline_lock:
                 # --- スキル検索 + メッセージ組み立て ---
                 skill_context = ""
@@ -397,9 +477,18 @@ class AudioPipeline:
                     }
                     for h in self._history
                 )
-                messages.append({"role": "user", "content": text})
 
-                await self._process_llm_and_tts(messages, text)
+                # グループモード: 話者名プレフィックス付与
+                user_text = text
+                if speaker_name and settings.conversation_mode == "group":
+                    user_text = f"[{speaker_name}] {text}"
+                messages.append({"role": "user", "content": user_text})
+
+                await self._process_llm_and_tts(
+                    messages, user_text,
+                    speaker=speaker_name,
+                    speaker_embedding=speaker_embedding,
+                )
                 tts_end_sent = True
 
         except asyncio.CancelledError:

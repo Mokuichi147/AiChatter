@@ -47,6 +47,7 @@ app = FastAPI(title="AiChatter Server")
 _asr = None
 _llm = None
 _tts = None
+_speaker_id = None
 _tool_factory: ToolFactory | None = None
 _tool_registry_ws = None
 _tool_registry_api = None
@@ -236,7 +237,7 @@ async def _subagent_result_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _tool_factory, _tool_registry_ws, _tool_registry_api
+    global _asr, _llm, _tts, _speaker_id, _tool_factory, _tool_registry_ws, _tool_registry_api
     global _notification_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
@@ -285,11 +286,24 @@ async def startup_event() -> None:
         _tts = LocalTTS()
         logger.info("AIモデルプリロード完了")
 
+        # グループモード: 話者識別初期化
+        if settings.conversation_mode == "group":
+            from config import character_data_path
+            from speaker_id import SpeakerIdentifier
+
+            speakers_path = character_data_path("speakers.json")
+            _speaker_id = SpeakerIdentifier(
+                speakers_path,
+                similarity_threshold=settings.speaker_similarity_threshold,
+            )
+            logger.info("話者識別モジュール初期化完了 (グループモード)")
+
         # ツールレジストリ初期化
         if settings.tools_enabled:
             _tool_factory = ToolFactory(
                 tts=_tts,
                 get_pipelines=lambda: _active_pipelines,
+                speaker_id=_speaker_id,
             )
             _tool_registry_ws = _tool_factory.create_registry({CAP_M5_DEVICE})
             _tool_registry_api = _tool_factory.create_registry(set())
@@ -349,7 +363,7 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    global _asr, _llm, _tts, _tool_factory, _tool_registry_ws, _tool_registry_api
+    global _asr, _llm, _tts, _speaker_id, _tool_factory, _tool_registry_ws, _tool_registry_api
     global _notification_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
@@ -381,6 +395,7 @@ async def shutdown_event() -> None:
     await _close_component("asr", _asr)
 
     _subagent_job_manager = None
+    _speaker_id = None
     _notification_store = None
     _memory_store = None
     _skill_provider = None
@@ -591,7 +606,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await websocket.send_bytes(data)
 
             pipeline = AudioPipeline(
-                send_fn, _asr, _llm, _tts, _tool_registry_ws, _skill_provider
+                send_fn, _asr, _llm, _tts, _tool_registry_ws, _skill_provider,
+                speaker_id=_speaker_id,
             )
             _active_pipelines.append(pipeline)
             await pipeline.send_wake()
@@ -683,7 +699,15 @@ if __name__ == "__main__":
             "例: -c character.yaml / -c 'character*.yaml'"
         ),
     )
+    parser.add_argument(
+        "--group",
+        action="store_true",
+        help="グループモードで起動する（複数人会話・話者識別を有効化）",
+    )
     args = parser.parse_args()
+
+    if args.group:
+        settings.conversation_mode = "group"
 
     if args.character:
         import config as _config

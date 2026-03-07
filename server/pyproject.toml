@@ -21,6 +21,8 @@ dependencies = [
     "sudachidict_core>=20240716",
     "rank_bm25>=0.2.2",
     "resvg-py>=0.2.6",
+    "transformers>=4.30.0",
+    "torch>=2.0.0",
 ]
 
 [build-system]

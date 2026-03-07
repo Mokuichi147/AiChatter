@@ -204,6 +204,7 @@ class SkillsConfig:
 class PromptConfig:
     output_rules: str = ""
     tool_guide_base: str = ""
+    group_rules: str = ""
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     subagent_system_prompt: str = ""
 
@@ -246,6 +247,7 @@ def load_prompt(yaml_path: str) -> PromptConfig:
     config = PromptConfig(
         output_rules=data.get("output_rules", ""),
         tool_guide_base=data.get("tool_guide_base", ""),
+        group_rules=data.get("group_rules", ""),
         skills=skills,
         subagent_system_prompt=data.get("subagent_system_prompt", ""),
     )
@@ -289,6 +291,10 @@ class Settings(BaseSettings):
 
     # 通知の永続化
     notification_file: str = "data/notifications.json"
+
+    # 会話モード
+    conversation_mode: str = "solo"  # "solo" or "group"
+    speaker_similarity_threshold: float = 0.65
 
     # サーバー設定
     host: str = "0.0.0.0"

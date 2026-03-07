@@ -201,6 +201,9 @@ async def _run_chat(args: argparse.Namespace) -> None:
 def _run_server(args: argparse.Namespace) -> None:
     _apply_server_character_selection(args.character)
 
+    if args.group:
+        settings.conversation_mode = "group"
+
     from main import ECHO_MODE, app
     import uvicorn
 
@@ -246,6 +249,11 @@ if __name__ == "__main__":
             "デフォルトキャラクターファイルまたはglobパターン。"
             "例: -c character.yaml / -c 'character*.yaml'"
         ),
+    )
+    server_parser.add_argument(
+        "--group",
+        action="store_true",
+        help="グループモードで起動する（複数人会話・話者識別を有効化）",
     )
 
     # 互換性: サブコマンド未指定時は chat 扱い
