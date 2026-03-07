@@ -188,9 +188,23 @@ def load_llm(yaml_path: str) -> LlmConfig:
 
 
 @dataclass
+class SkillEntry:
+    match: str = ""
+    guide: str = ""
+
+
+@dataclass
+class SkillsConfig:
+    memory_top_k: int = 3
+    tool_skill_top_k: int = 5
+    tools: list[SkillEntry] = field(default_factory=list)
+
+
+@dataclass
 class PromptConfig:
     output_rules: str = ""
-    tool_guide: str = ""
+    tool_guide_base: str = ""
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     subagent_system_prompt: str = ""
 
 
@@ -207,9 +221,32 @@ def load_prompt(yaml_path: str) -> PromptConfig:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
+    skills_data = data.get("skills", {})
+    tool_entries = []
+    for entry in skills_data.get("tools", []):
+        if isinstance(entry, dict):
+            tool_entries.append(SkillEntry(
+                match=entry.get("match", ""),
+                guide=entry.get("guide", ""),
+            ))
+    try:
+        memory_top_k = int(skills_data.get("memory_top_k", 3))
+    except (TypeError, ValueError):
+        memory_top_k = 3
+    try:
+        tool_skill_top_k = int(skills_data.get("tool_skill_top_k", 5))
+    except (TypeError, ValueError):
+        tool_skill_top_k = 5
+    skills = SkillsConfig(
+        memory_top_k=memory_top_k,
+        tool_skill_top_k=tool_skill_top_k,
+        tools=tool_entries,
+    )
+
     config = PromptConfig(
         output_rules=data.get("output_rules", ""),
-        tool_guide=data.get("tool_guide", ""),
+        tool_guide_base=data.get("tool_guide_base", ""),
+        skills=skills,
         subagent_system_prompt=data.get("subagent_system_prompt", ""),
     )
     logger.info(f"プロンプト設定読み込み完了: {path}")

@@ -44,7 +44,7 @@ class ToolFactory:
         self.notification_store = NotificationStore(settings.notification_file)
         self.skill_provider = SkillProvider(
             memory_store=self.memory_store,
-            tool_guide=prompt_config.tool_guide,
+            skills_config=prompt_config.skills,
         )
 
     def create_registry(self, capabilities: set[str] | None = None) -> ToolRegistry:

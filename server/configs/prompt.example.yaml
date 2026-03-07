@@ -12,8 +12,8 @@ output_rules: |
   括弧（「」や（）など）は最小限にし、読み上げやすさを優先してください。
   現在の日時: {{DATETIME}}
 
-# ツール使用ガイド（ツール有効時にシステムプロンプトへ追加）
-tool_guide: |
+# ツール使用ガイド基本ルール（ツール有効時に常にシステムプロンプトへ追加）
+tool_guide_base: |
   ## ツール使用ガイド
   ツールは会話を助けるために、必要なときだけ使ってください。
   ツールはユーザーの最新の発言に応えるためだけに使い、過去の会話に関する追加調査は行わないでください。
@@ -25,19 +25,39 @@ tool_guide: |
   会話では「サブエージェント」という語を使わず、あなた自身が確認している自然な言い回しで伝えてください。
   悪い例: わかった、あとでやっておくね。
   良い例: わかった、今通知を設定したよ。明日の7時に鳴るようにした。
-  - save_memory: ユーザーの名前・好み・重要な事実・約束など、後で参照する価値が高い情報を記録します。
-  - search_memory: 過去の記憶や会話履歴を検索します。必要に応じて日付(after/before)で絞り込みできます。
-  - delete_memory: 不要な記憶を削除します。先にsearch_memoryでキーを確認してください。
-  - set_volume: 音量調整を頼まれたときに使います。
-  - set_notification: 通知やリマインダーを予約します。定期通知はrepeatで指定: 'every:30m'(30分毎), 'every:2h'(2時間毎), 'cron:08:00'(毎日8時), 'cron:07:30:weekdays'(平日), 'cron:09:00:mon,fri'(曜日指定)。
-  - list_notifications: 予約済み通知の一覧を確認します。
-  - delete_notification: 通知をキャンセルします。先にlist_notificationsでIDを確認してください。
-  - set_sleep: デバイスをスリープさせます。「おやすみ」など就寝の流れになったときに使います。
-  - display_text: M5StickS3の画面にテキストを表示します。短いメモや進行状況の提示に使います。
-  - display_image: M5StickS3の画面に画像を表示します。image_path / image_url / svg / mermaid / rgb565_base64 に対応します。
-  - run_subagent_research: 時間のかかる調査をバックグラウンドで開始します。Web検索やメモリ検索を複数回行う詳細調査に使います。
-  - list_subagent_jobs: サブエージェントジョブの進捗を確認します。
-  - get_subagent_job: 完了ジョブの結果を取得します。結果をユーザーに伝えるかどうかは、会話文脈を見てあなたが判断してください。
+
+# スキル定義（ユーザー発言とmatchのEmbedding類似度で動的に選択し、guideをプロンプトへ注入）
+# memory_top_k: 自動想起するメモリ件数 (デフォルト: 3)
+# tool_skill_top_k: 注入するスキル件数 (デフォルト: 5)
+skills:
+  memory_top_k: 3
+  tool_skill_top_k: 5
+  tools:
+    - match: "記憶の保存・検索・削除、ユーザーの好みや名前を覚える"
+      guide: |
+        save_memory: ユーザーの名前・好み・重要な事実・約束など、後で参照する価値が高い情報を記録します。
+        search_memory: 過去の記憶や会話履歴を検索します。必要に応じて日付(after/before)で絞り込みできます。
+        delete_memory: 不要な記憶を削除します。先にsearch_memoryでキーを確認してください。
+    - match: "音量の調整、声の大きさを変える"
+      guide: |
+        set_volume: 音量調整を頼まれたときに使います。
+    - match: "通知・リマインダー・アラームの設定・確認・削除"
+      guide: |
+        set_notification: 通知やリマインダーを予約します。定期通知はrepeatで指定: 'every:30m'(30分毎), 'every:2h'(2時間毎), 'cron:08:00'(毎日8時), 'cron:07:30:weekdays'(平日), 'cron:09:00:mon,fri'(曜日指定)。
+        list_notifications: 予約済み通知の一覧を確認します。
+        delete_notification: 通知をキャンセルします。先にlist_notificationsでIDを確認してください。
+    - match: "スリープ、おやすみ、電源オフ"
+      guide: |
+        set_sleep: デバイスをスリープさせます。「おやすみ」など就寝の流れになったときに使います。
+    - match: "画面にテキストや画像を表示する"
+      guide: |
+        display_text: デバイスの画面にテキストを表示します。短いメモや進行状況の提示に使います。
+        display_image: デバイスの画面に画像を表示します。image_path / image_url / svg / mermaid / rgb565_base64 に対応します。
+    - match: "調べもの、詳しく調査、ウェブ検索"
+      guide: |
+        run_subagent_research: 時間のかかる調査をバックグラウンドで開始します。Web検索やメモリ検索を複数回行う詳細調査に使います。
+        list_subagent_jobs: サブエージェントジョブの進捗を確認します。
+        get_subagent_job: 完了ジョブの結果を取得します。結果をユーザーに伝えるかどうかは、会話文脈を見てあなたが判断してください。
 
 # サブエージェント用システムプロンプト
 subagent_system_prompt: |

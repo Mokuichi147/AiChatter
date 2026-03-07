@@ -52,14 +52,12 @@ class ChatEngine:
             system_prompt += "\n\n" + prompt_config.output_rules.strip()
 
         if (
-            self._skill_provider
-            and self._tool_registry
+            self._tool_registry
             and not self._tool_registry.is_empty
             and settings.tools_enabled
+            and prompt_config.tool_guide_base
         ):
-            base = self._skill_provider.tool_guide_base
-            if base:
-                system_prompt += "\n\n" + base
+            system_prompt += "\n\n" + prompt_config.tool_guide_base.strip()
 
         if skill_context:
             system_prompt += "\n\n" + skill_context

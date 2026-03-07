@@ -237,14 +237,12 @@ class AudioPipeline:
 
         # ツール有効時はツール使用ガイドのベース部分を追加
         if (
-            self.skill_provider
-            and self.tool_registry
+            self.tool_registry
             and not self.tool_registry.is_empty
             and settings.tools_enabled
+            and prompt_config.tool_guide_base
         ):
-            base = self.skill_provider.tool_guide_base
-            if base:
-                system_prompt += "\n\n" + base
+            system_prompt += "\n\n" + prompt_config.tool_guide_base.strip()
 
         if skill_context:
             system_prompt += "\n\n" + skill_context

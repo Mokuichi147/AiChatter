@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from config import SkillEntry, SkillsConfig
 from tools.conversation_memory import MemoryStore
 
 logger = logging.getLogger(__name__)
@@ -13,36 +14,14 @@ class SkillProvider:
     def __init__(
         self,
         memory_store: MemoryStore,
-        tool_guide: str = "",
-        memory_top_k: int = 3,
-        tool_skill_top_k: int = 5,
+        skills_config: SkillsConfig,
     ) -> None:
         self._memory_store = memory_store
-        self._memory_top_k = memory_top_k
-        self._tool_skill_top_k = tool_skill_top_k
-        self._tool_guide_base, self._tool_skills = self._parse_tool_guide(tool_guide)
-
-    @staticmethod
-    def _parse_tool_guide(tool_guide: str) -> tuple[str, list[dict]]:
-        base_lines: list[str] = []
-        tool_entries: list[dict] = []
-        for line in tool_guide.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("- ") and ":" in stripped:
-                rest = stripped[2:]
-                name, desc = rest.split(":", 1)
-                tool_entries.append({
-                    "name": name.strip(),
-                    "text": stripped,
-                    "description": desc.strip(),
-                })
-            else:
-                base_lines.append(line)
-        return "\n".join(base_lines).strip(), tool_entries
-
-    @property
-    def tool_guide_base(self) -> str:
-        return self._tool_guide_base
+        self._memory_top_k = skills_config.memory_top_k
+        self._tool_skill_top_k = skills_config.tool_skill_top_k
+        self._tool_skills: list[SkillEntry] = [
+            s for s in skills_config.tools if s.match and s.guide
+        ]
 
     async def retrieve(
         self,
@@ -51,7 +30,7 @@ class SkillProvider:
     ) -> str:
         sections: list[str] = []
 
-        tool_ctx = await self._retrieve_tool_skills(query, available_tools)
+        tool_ctx = await self._retrieve_tool_skills(query)
         if tool_ctx:
             sections.append(tool_ctx)
 
@@ -61,23 +40,17 @@ class SkillProvider:
 
         return "\n\n".join(sections)
 
-    async def _retrieve_tool_skills(
-        self,
-        query: str,
-        available_tools: set[str] | None,
-    ) -> str:
+    async def _retrieve_tool_skills(self, query: str) -> str:
         candidates = self._tool_skills
-        if available_tools:
-            candidates = [s for s in candidates if s["name"] in available_tools]
         if not candidates:
             return ""
 
         # 候補数がtop_k以下ならそのまま全て返す
         if len(candidates) <= self._tool_skill_top_k:
-            return "\n".join(s["text"] for s in candidates)
+            return "\n".join(s.guide.strip() for s in candidates)
 
-        # Embeddingで関連度の高いツールを選択
-        docs = [s["description"] for s in candidates]
+        # Embeddingで関連度の高いスキルを選択
+        docs = [s.match for s in candidates]
         scores = await self._memory_store.embedding_similarity(query, docs)
 
         ranked = sorted(
@@ -86,9 +59,9 @@ class SkillProvider:
         selected = [s for s, score in ranked[: self._tool_skill_top_k] if score > 0]
 
         if not selected:
-            return "\n".join(s["text"] for s in candidates)
+            return "\n".join(s.guide.strip() for s in candidates)
 
-        return "\n".join(s["text"] for s in selected)
+        return "\n".join(s.guide.strip() for s in selected)
 
     async def _retrieve_memories(self, query: str) -> str:
         results = await self._memory_store.search(query, include_auto=False)
