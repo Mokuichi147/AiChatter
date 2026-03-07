@@ -1,20 +1,33 @@
 # AiChatter - M5StickS3 常時会話AI音声アシスタント
 
-M5StickS3を応答中でも割り込み可能（バージイン対応）な常時会話型AI音声アシスタントにするプロジェクト。
+M5StickS3をバージイン対応の常時会話型AI音声アシスタントにするプロジェクト。
 すべてのAI処理はローカル実行（クラウドAPI不使用）。
 
 ## アーキテクチャ
 
 ```
 M5StickS3 (ESP32-S3)          PCサーバー (Python + uv)
-┌───────────────────┐         ┌────────────────────────────┐
-│ ES8311 全二重音声 │◄──WS────│ FastAPI WebSocket           │
-│ ESP-SR AFE        │  PCM    │ AudioPipeline               │
-│ (AEC + VAD)       │         │  ├── faster-whisper (ASR)   │
-│ ステートマシン     │         │  ├── Ollama (LLM)           │
-│ LCD表示           │         │  └── piper-tts (TTS)        │
-└───────────────────┘         └────────────────────────────┘
+┌───────────────────┐         ┌────────────────────────────────┐
+│ ES8311 全二重音声 │◄──WS────│ FastAPI WebSocket               │
+│ ESP-SR AFE        │  PCM    │ AudioPipeline                   │
+│ (AEC + VAD)       │         │  ├── Qwen3-ASR (ASR / mlx)     │
+│ ステートマシン     │         │  ├── Responses API互換LLM        │
+│ LCD表示           │         │  ├── Qwen3-TTS (TTS / mlx)     │
+│                   │         │  ├── ツール (記憶/通知/検索等)   │
+│                   │         │  └── 話者識別 (WavLM-XVector)   │
+└───────────────────┘         └────────────────────────────────┘
 ```
+
+## 主な機能
+
+- **音声対話**: ASR → LLM → TTS のパイプラインによるリアルタイム音声会話
+- **バージイン**: 応答中でも割り込んで次の発話が可能
+- **キャラクター設定**: YAMLで人格・声を定義。複数キャラクターの切替対応
+- **ツール実行**: 記憶保存/検索、通知・リマインダー、Web検索、画面表示、音量調整、スリープ制御
+- **スキル動的注入**: ユーザー発言に応じてツール使用ガイドとメモリを自動でプロンプトに注入
+- **サブエージェント**: 時間のかかる調査をバックグラウンドで実行し結果を通知
+- **グループモード**: 声紋で話者を識別し、複数人会話に対応（`--group`フラグで有効化）
+- **REST API / CLI / SDK**: M5StickS3未接続でもテキストベースで利用可能
 
 ## セットアップ
 
@@ -22,116 +35,192 @@ M5StickS3 (ESP32-S3)          PCサーバー (Python + uv)
 - M5StickS3 (ESP32-S3)
 - Python 3.10+ / uv
 - ESP-IDF 5.3
-- Ollama (granite4:micro-h または qwen2.5:7b など)
+- OpenAI Responses API互換のLLMサーバー（Ollama等）
 
-### Stage 0: 開発環境セットアップ
+### サーバー準備
 
-#### ESP-IDF 5.3 インストール
 ```bash
-mkdir ~/esp && cd ~/esp
-git clone --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf && git checkout v5.3
-./install.sh esp32s3
-source export.sh   # 毎回必要（.zshrcに追加推奨）
-```
-
-#### Pythonサーバー依存関係インストール
-```bash
-cd AiChatter/server
+cd server
 uv sync
-```
-
-#### piper-tts 日本語モデルのダウンロード
-```bash
-cd server
-mkdir -p models
-uv run python -c "
-import urllib.request, os
-base = 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ja/ja_JP/kokoro/medium'
-urllib.request.urlretrieve(base + '/ja_JP-kokoro-medium.onnx', 'models/tts.onnx')
-urllib.request.urlretrieve(base + '/ja_JP-kokoro-medium.onnx.json', 'models/tts.onnx.json')
-print('Done')
-"
-```
-
-### Stage 1: サーバー起動
-
-```bash
-cd server
 cp .env.example .env
-# .envを編集してモデルパス等を設定
+cp configs/character.example.yaml configs/character.yaml
+cp configs/llm.example.yaml configs/llm.yaml
+cp configs/prompt.example.yaml configs/prompt.yaml
+```
+
+#### 設定ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| `.env` | ASRモデル、APIキー、サーバーポート等 |
+| `configs/character.yaml` | キャラクター（人格・声）の定義 |
+| `configs/llm.yaml` | LLM・Embedding・Rerankの接続設定 |
+| `configs/prompt.yaml` | 出力ルール・ツールガイド・スキル定義 |
+
+#### キャラクター設定 (`configs/character.yaml`)
+
+```yaml
+persona:
+  name: "アイ"
+  system_prompt: |
+    あなたは「アイ」という名前の明るく元気な女の子です。
+
+voice:
+  # 方法1: テキスト説明から声を自動生成
+  type: "description"
+  description: "可愛らしい女性の声。高めのトーンで、明るく弾むような話し方。"
+
+  # 方法2: WAVファイルで声を指定
+  # type: "reference"
+  # wav_file: "voices/my_voice.wav"
+  # transcript: "参照音声に対応するテキスト"
+```
+
+#### LLM設定 (`configs/llm.yaml`)
+
+```yaml
+# メインLLM（Responses API互換）
+model: "qwen2.5:7b"
+base_url: "http://localhost:11434/v1"
+api_key: ""
+
+# サブエージェントLLM（省略時はメインと同じ）
+sub:
+  model: ""
+  base_url: ""
+
+# Embedding API（メモリ検索の精度向上、省略可）
+embeddings:
+  model: "text-embedding-3-small"
+  base_url: ""
+  dimensions: 0
+
+# Rerank API（検索結果の再順位付け、省略可）
+rerank:
+  model: "jina-reranker-v2-base-multilingual"
+  base_url: ""
+```
+
+### サーバー起動
+
+```bash
+cd server
 uv run python main.py
 ```
 
-#### デフォルトキャラクターをファイル名で指定して起動
+#### オプション
+
 ```bash
-cd server
-uv run python main.py --character character_amamya.yaml
+# キャラクター指定
+uv run python main.py -c character_custom.yaml
+
+# グループモード（話者識別有効）
+uv run python main.py --group
 ```
 
-### Stage 1.5: M5未接続での利用（REST/CLI/SDK）
+### CLI経由での起動
 
-#### REST API（同期応答）
 ```bash
+cd server
+
+# CLIモード（テキスト対話）
+uv run python cli.py chat --stream
+
+# サーバー起動
+uv run python cli.py server -c 'character*.yaml'
+
+# グループモードでサーバー起動
+uv run python cli.py server --group
+```
+
+### ファームウェアビルド
+
+```bash
+# ESP-IDF環境をロード
+source ~/esp/esp-idf/export.sh
+
+cd firmware
+
+# WiFi/サーバーIP設定
+nano main/config.h
+
+idf.py set-target esp32s3
+idf.py build
+```
+
+### REST API
+
+```bash
+# セッション作成
 curl -X POST http://127.0.0.1:8765/api/v1/sessions \
   -H 'content-type: application/json' \
-  -d '{"session_id":"demo","history_mode":"isolated","character_id":"character.yaml"}'
+  -d '{"session_id":"demo","history_mode":"isolated"}'
 
+# チャット（同期）
 curl -X POST http://127.0.0.1:8765/api/v1/chat \
   -H 'content-type: application/json' \
   -d '{"session_id":"demo","text":"こんにちは"}'
-```
 
-#### REST API（SSEストリーミング）
-```bash
+# チャット（SSEストリーミング）
 curl -N -X POST http://127.0.0.1:8765/api/v1/chat/stream \
   -H 'content-type: application/json' \
   -d '{"session_id":"demo","text":"今日の予定を教えて"}'
-```
 
-#### キャラクター一覧取得
-```bash
+# キャラクター一覧
 curl http://127.0.0.1:8765/api/v1/characters
 ```
 
-#### CLIモード
-```bash
-cd server
-uv run python cli.py --history-mode isolated --stream
-```
+### Python SDK
 
-#### CLIからサーバー起動（`main.py -c` の代替）
-```bash
-cd server
-uv run python cli.py server -c 'character*.yaml'
-```
-
-#### Python SDK（同一プロセス）
 ```python
 import asyncio
 from aichatter import create_runtime
 
 async def main():
     runtime = await create_runtime()
-    await runtime.create_session("sdk-demo", history_mode="isolated", character_id="character.yaml")
-    result = await runtime.chat("sdk-demo", "自己紹介して")
+    await runtime.create_session("demo", history_mode="isolated")
+    result = await runtime.chat("demo", "自己紹介して")
     print(result["text"])
 
 asyncio.run(main())
 ```
 
-### Stage 2: ファームウェアビルド
+## グループモード（複数人会話）
 
-```bash
-# ESP-IDF環境をロード済みで:
-cd firmware
+`--group`フラグで起動すると、声紋（WavLM-XVector）による話者識別が有効になります。
 
-# WiFi/サーバーIP設定 (main/config.hを編集)
-nano main/config.h
+- 各発言に `[話者名]` プレフィックスが付与され、LLMが誰の発言か認識
+- 未登録者は `[不明な人A]` `[不明な人B]` と自動でクラスタリング
+- 名乗り（「私は太郎だよ」）を検出すると自動で声を登録
+- 他者同士の会話には `[SKIP]` を返しTTS合成をスキップ
+- `.env`の`SPEAKER_SIMILARITY_THRESHOLD`で識別閾値を調整可能（デフォルト: 0.65）
 
-idf.py set-target esp32s3
-idf.py -p /dev/cu.usbmodem1101 flash monitor
-```
+### 話者管理ツール
+
+LLMが自動で使用するツールとして、以下が利用可能です:
+
+- `register_speaker`: 今話している人の声を名前で登録
+- `list_speakers`: 登録済み話者の一覧
+- `unregister_speaker`: 話者登録の解除
+- `merge_speakers`: 同一人物が別名で登録された場合の統合
+
+## ツール一覧
+
+| ツール | 機能 | 利用条件 |
+|--------|------|----------|
+| `save_memory` | 情報を記憶に保存 | 常時 |
+| `search_memory` | 記憶を検索 | 常時 |
+| `delete_memory` | 記憶を削除 | 常時 |
+| `search` | Web検索 | `TAVILY_API_KEY`設定時 |
+| `set_notification` | 通知・リマインダー設定 | 常時 |
+| `list_notifications` | 通知一覧 | 常時 |
+| `delete_notification` | 通知削除 | 常時 |
+| `set_volume` | 音量調整 | 常時 |
+| `set_sleep` | デバイスをスリープ | M5接続時 |
+| `display_text` | 画面にテキスト表示 | M5接続時 |
+| `display_image` | 画面に画像表示 | M5接続時 |
+| `run_subagent_research` | バックグラウンド調査 | サブエージェント有効時 |
+| `register_speaker` | 話者の声を登録 | グループモード時 |
 
 ## WebSocketプロトコル（7バイトバイナリヘッダー）
 
@@ -140,8 +229,11 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 | 0x01  | ESP32 → Server | 音声チャンク       |
 | 0x11  | ESP32 → Server | 発話終了(EOS)      |
 | 0x12  | ESP32 → Server | バージイン割り込み  |
+| 0x13  | ESP32 → Server | ボタン押下         |
 | 0x02  | Server → ESP32 | TTS音声チャンク    |
 | 0x03  | Server → ESP32 | TTS終了            |
+| 0x04  | Server → ESP32 | スリープ指示       |
+| 0x05  | Server → ESP32 | ウェイク指示       |
 | 0x20  | Server → ESP32 | テキスト表示       |
 | 0x21  | Server → ESP32 | 画像ブロック表示   |
 
@@ -155,23 +247,27 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 
 ## ハードウェアピン（M5StickS3）
 
-| 機能        | GPIO |
-|-------------|------|
-| I2S MCLK    | 18   |
-| I2S BCLK    | 17   |
-| I2S WS      | 15   |
-| I2S DOUT    | 14   |
-| I2S DIN     | 16   |
-| I2C SDA     | 47   |
-| I2C SCL     | 48   |
-| ES8311 I2C  | 0x18 |
-| ボタンA     | 35   |
-| LCD MOSI    | 39   |
-| LCD SCLK    | 40   |
-| LCD CS      | 41   |
-| LCD DC      | 45   |
-| LCD RST     | 21   |
-| LCD BL      | 38   |
+| 機能 | GPIO |
+|------|------|
+| I2S MCLK | 18 |
+| I2S BCLK | 17 |
+| I2S WS | 15 |
+| I2S DOUT | 14 |
+| I2S DIN | 16 |
+| I2C SDA (内部) | 47 |
+| I2C SCL (内部) | 48 |
+| I2C SDA (Grove) | 9 |
+| I2C SCL (Grove) | 10 |
+| ボタンA (フロント) | 11 |
+| ボタンB (サイド/電源) | 12 |
+| LCD MOSI | 39 |
+| LCD SCLK | 40 |
+| LCD CS | 41 |
+| LCD DC | 45 |
+| LCD RST | 21 |
+| LCD BL | 38 |
+| IR送信 | 46 |
+| IR受信 | 42 |
 
 ## LCD状態表示
 
@@ -181,28 +277,3 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 | 青     | LISTENING  |
 | 黄     | PROCESSING |
 | 緑     | SPEAKING   |
-
-### ディスプレイ制御ツール
-- `display_text`: 画面にテキスト表示（日本語対応、`size`で文字サイズ1-4を指定）
-- `display_image`: 画像表示（`image_path` / `image_url` / `svg` / `mermaid` / `rgb565_base64`）
-  - `image_path` / `image_url` は PNG/JPEG/SVG を受け付けて表示
-  - `svg` はSVG文字列を直接渡して表示
-  - `mermaid` はMermaid構文を図にレンダリングして表示
-- RGB565は row-major / big-endian の生データ
-- サーバー側で複数ブロックに分割して送信されるため、全画面画像も表示可能
-- 日本語フォントを自動検出できない場合は `AICHATTER_DISPLAY_FONT` にフォントファイルパスを設定
-- SVGをローカル変換するため `resvg-py` が必要（`cd server && uv sync`）
-
-## 動作確認
-
-1. Ollama が起動していることを確認: `ollama list`
-2. サーバーを起動: `cd server && uv run python main.py`
-3. ファームウェアをフラッシュ: `idf.py -p /dev/cu.usbmodem1101 flash monitor`
-4. 話しかける → LCDが青（LISTENING）→ 黄（PROCESSING）→ 緑（SPEAKING）
-5. 応答中に割り込む → 即座に止まってLISTENING状態に遷移
-
-## レイテンシ目標
-- ASR: < 1秒
-- LLM TTFT: < 2秒
-- TTS: < 0.5秒
-- エンドツーエンド: < 4秒
