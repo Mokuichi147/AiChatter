@@ -204,10 +204,13 @@ async def _run_chat(args: argparse.Namespace) -> None:
     # 即座に KeyboardInterrupt を受け取れるようにする
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
+    from prompt_toolkit import PromptSession
+    session = PromptSession()
+
     try:
         while True:
             try:
-                user_text = input("you> ").strip()
+                user_text = (await session.prompt_async("you> ")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
