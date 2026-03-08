@@ -204,7 +204,12 @@ static void handle_event(sm_event_t event, const uint8_t *data,
 
         /* ---- PROCESSING: AI処理待ち ---- */
         case SM_STATE_PROCESSING:
-            if (event == SM_EVENT_WS_TTS_CHUNK) {
+            if (event == SM_EVENT_VAD_START) {
+                /* 処理中に新しい発話を検出 → 割り込みして録音へ */
+                ws_client_send_interrupt();
+                ws_client_clear_audio_buffer();
+                set_state(SM_STATE_LISTENING);
+            } else if (event == SM_EVENT_WS_TTS_CHUNK) {
                 /* 最初のTTS音声チャンク通知 → 再生状態へ
                  * (音声データはmain.cのコールバックで直接再生バッファへ) */
                 set_state(SM_STATE_SPEAKING);

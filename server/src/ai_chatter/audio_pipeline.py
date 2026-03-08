@@ -77,6 +77,10 @@ class AudioPipeline:
         self._ws_closed: bool = False
         self._current_audio_data: Optional[bytes] = None
 
+        # 割り込みで失われた発話テキストを保存（次のASRが空なら再処理）
+        self._last_user_text: Optional[str] = None
+        self._pending_user_text: Optional[str] = None
+
     @staticmethod
     def _history_path() -> Path:
         path = Path(character_data_path("history.json"))
@@ -157,6 +161,12 @@ class AudioPipeline:
     async def process_interrupt(self) -> None:
         logger.info("バージイン割り込み受信")
         self._interrupted = True
+
+        # 処理中の発話テキストを保存（次のASRが空なら再処理用）
+        if self._last_user_text:
+            self._pending_user_text = self._last_user_text
+            self._last_user_text = None
+            logger.info(f"割り込み: 発話テキストを保存: '{self._pending_user_text[:30]}...'")
 
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
@@ -439,36 +449,63 @@ class AudioPipeline:
                     raise
 
             if not text or text == "はい。":
-                logger.info("ASR: 空の認識結果、TTS_END送信")
-                header = make_header(MSG_TTS_END, self._next_seq(), 0)
-                await self._safe_send(header)
-                tts_end_sent = True
-                return
+                # 割り込みで保存された発話テキストがあれば再処理
+                if self._pending_user_text:
+                    logger.info(
+                        f"ASR空結果 → 保存テキストで再処理: "
+                        f"'{self._pending_user_text[:30]}...'"
+                    )
+                    text = None  # ASRテキストは使わない
+                    user_text_override = self._pending_user_text
+                    self._pending_user_text = None
+                else:
+                    logger.info("ASR: 空の認識結果、TTS_END送信")
+                    header = make_header(MSG_TTS_END, self._next_seq(), 0)
+                    await self._safe_send(header)
+                    tts_end_sent = True
+                    return
+            else:
+                user_text_override = None
+                self._pending_user_text = None  # 有効な新規発話 → 保存テキスト破棄
 
-            logger.info(f"ASR認識: '{text}'")
+            logger.info(f"ASR認識: '{text or user_text_override}'")
 
-            # --- グループモード: 話者識別 ---
-            speaker_name = None
-            speaker_embedding = None
-            if self.speaker_id and settings.conversation_mode == "group":
-                self._current_audio_data = audio_data
+            # 割り込み復帰の場合は保存テキストをそのまま使う
+            if user_text_override:
+                user_text = user_text_override
+                speaker_name = None
+                speaker_embedding = None
+            else:
+                # --- グループモード: 話者識別 ---
+                speaker_name = None
+                speaker_embedding = None
+                if self.speaker_id and settings.conversation_mode == "group":
+                    self._current_audio_data = audio_data
 
-                identified, score = await loop.run_in_executor(
-                    None, lambda: self.speaker_id.identify(audio_data)
-                )
-                speaker_name = identified
-                logger.info(f"話者識別: {identified} (score={score:.3f})")
+                    identified, score = await loop.run_in_executor(
+                        None, lambda: self.speaker_id.identify(audio_data)
+                    )
+                    speaker_name = identified
+                    logger.info(f"話者識別: {identified} (score={score:.3f})")
 
-                # embedding を保存用に計算
-                speaker_embedding = await loop.run_in_executor(
-                    None, lambda: self.speaker_id.compute_embedding(audio_data).tolist()
-                )
+                    # embedding を保存用に計算
+                    speaker_embedding = await loop.run_in_executor(
+                        None, lambda: self.speaker_id.compute_embedding(audio_data).tolist()
+                    )
+
+                # グループモード: 話者名プレフィックス付与
+                user_text = text
+                if speaker_name and settings.conversation_mode == "group":
+                    user_text = f"[{speaker_name}] {text}"
 
             async with self._pipeline_lock:
+                # 処理中テキストを保存（割り込み時の復帰用）
+                self._last_user_text = user_text
+
                 # --- スキル検索 + メッセージ組み立て ---
                 skill_context = ""
                 if self.skill_provider:
-                    skill_context = await self.skill_provider.retrieve(text)
+                    skill_context = await self.skill_provider.retrieve(user_text)
                 system_prompt = self._build_system_prompt(skill_context)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(
@@ -478,11 +515,6 @@ class AudioPipeline:
                     }
                     for h in self._history
                 )
-
-                # グループモード: 話者名プレフィックス付与
-                user_text = text
-                if speaker_name and settings.conversation_mode == "group":
-                    user_text = f"[{speaker_name}] {text}"
                 messages.append({"role": "user", "content": user_text})
 
                 await self._process_llm_and_tts(
@@ -491,6 +523,9 @@ class AudioPipeline:
                     speaker_embedding=speaker_embedding,
                 )
                 tts_end_sent = True
+
+                # 処理完了 → 保存テキストをクリア
+                self._last_user_text = None
 
         except asyncio.CancelledError:
             logger.info("パイプラインタスクキャンセル")

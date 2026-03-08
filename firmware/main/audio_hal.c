@@ -346,11 +346,12 @@ static void mic_raw_task(void *arg) {
 
         bool is_speech = (rms_sq > VAD_RMS_SQ_THRESHOLD);
 
-        /* SPEAKING/PROCESSING中はVADイベントを抑制
-         * (AECなしのためスピーカー音声がマイクに回り込む) */
+        /* SPEAKING中はVADイベントを抑制
+         * (AECなしのためスピーカー音声がマイクに回り込む)
+         * PROCESSING中はスピーカー未使用のためVADを有効にして
+         * 他の人の発話を検出できるようにする */
         sm_state_t cur_state = state_machine_get_state();
-        bool vad_suppressed = (cur_state == SM_STATE_SPEAKING ||
-                               cur_state == SM_STATE_PROCESSING);
+        bool vad_suppressed = (cur_state == SM_STATE_SPEAKING);
 
         /* デバッグ: 5秒ごとにRMS²値をログ出力 */
         if (++log_counter >= 155) {
