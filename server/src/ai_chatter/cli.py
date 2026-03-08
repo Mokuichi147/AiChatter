@@ -20,44 +20,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _resolve_character(catalog: CharacterCatalog, value: str | None) -> str:
-    if value:
-        candidate = value.strip()
-        if catalog.has(candidate):
-            return candidate
-
-        # CLIはローカルファイルパス指定も許可
-        path = Path(candidate).expanduser()
-        if path.exists() and path.is_file():
-            entry = catalog.register_file(str(path))
-            logger.info(f"キャラクターを追加登録: {entry.character_id} ({entry.file_path})")
-            return entry.character_id
-
-        raise ValueError(f"character指定が不正です: {value}")
-
-    entries = catalog.list_entries()
-    if not entries:
-        raise RuntimeError("利用可能なキャラクターがありません")
-
-    print("利用可能なキャラクター:")
-    for idx, entry in enumerate(entries, 1):
-        name = entry.config.persona.name or entry.file_name
-        print(f"  {idx}. {name} [{entry.character_id}]")
-    print("  p. YAMLファイルパスを入力")
-
-    while True:
-        raw = input("選択してください (番号 or p): ").strip().lower()
-        if raw == "p":
-            file_path = input("YAMLファイルパス: ").strip()
-            entry = catalog.register_file(file_path)
-            logger.info(f"キャラクターを追加登録: {entry.character_id} ({entry.file_path})")
-            return entry.character_id
-        if raw.isdigit():
-            n = int(raw)
-            if 1 <= n <= len(entries):
-                return entries[n - 1].character_id
-        print("入力が不正です。もう一度入力してください。")
-
 
 def _build_tools():
     factory = ToolFactory(tts=None, get_pipelines=lambda: [])
@@ -177,12 +139,14 @@ async def _run_chat(args: argparse.Namespace) -> None:
     from ai_chatter.chat_engine import ChatEngine
     from ai_chatter.local_llm import LocalLLM
 
+    _apply_server_character_selection(args.character)
+
     catalog = CharacterCatalog(settings.character_dir, settings.character_glob)
     catalog.reload()
     if not catalog.list_entries():
         catalog.register_file(settings.character_file)
 
-    character_id = _resolve_character(catalog, args.character)
+    character_id = catalog.list_entries()[0].character_id
 
     history_mode = (args.history_mode or settings.default_history_mode).strip().lower()
     if history_mode not in ALLOWED_HISTORY_MODES:
@@ -235,7 +199,7 @@ async def _run_chat(args: argparse.Namespace) -> None:
                 break
 
             if args.stream:
-                print("ai> ", end="", flush=True)
+                print(f"{chosen_name}> ", end="", flush=True)
                 async for event in engine.stream_chat(session_id=session_id, text=user_text):
                     if event.get("type") == "chunk":
                         print(event.get("text", ""), end="", flush=True)
@@ -243,7 +207,7 @@ async def _run_chat(args: argparse.Namespace) -> None:
                         print()
             else:
                 result = await engine.chat(session_id=session_id, text=user_text)
-                print(f"ai> {result.get('text', '')}")
+                print(f"{chosen_name}> {result.get('text', '')}")
     except KeyboardInterrupt:
         print()
 
@@ -279,8 +243,13 @@ def main() -> None:
 
     chat_parser = subparsers.add_parser("chat", help="対話CLIモード")
     chat_parser.add_argument(
+        "-c",
         "--character",
-        help="キャラクターIDまたはYAMLファイルパス。省略時は一覧選択",
+        nargs="+",
+        help=(
+            "デフォルトキャラクターファイルまたはglobパターン。"
+            "例: -c character.yaml / -c 'character*.yaml'"
+        ),
     )
     chat_parser.add_argument(
         "--history-mode",
