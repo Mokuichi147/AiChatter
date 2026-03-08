@@ -9,9 +9,15 @@ from ai_chatter._paths import SERVER_ROOT
 
 logger = logging.getLogger(__name__)
 
-# デフォルトモデル
+# デフォルトモデル (macOS / mlx-audio)
 DEFAULT_TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
 DEFAULT_VOICE_DESIGN_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
+DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-0.6B-8bit"
+
+# デフォルトモデル (非macOS / qwen-tts, qwen-asr)
+DEFAULT_TTS_MODEL_CPU = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+DEFAULT_VOICE_DESIGN_MODEL_CPU = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+DEFAULT_ASR_MODEL_CPU = "Qwen/Qwen3-ASR-0.6B"
 
 
 @dataclass
@@ -20,20 +26,9 @@ class VoiceConfig:
     # description用
     description: str = "可愛らしい女性の声。高めのトーンで、明るく弾むような話し方。"
     sample_text: str = "こんにちは、今日はいい天気ですね。"
-    voice_design_model: str = ""
     # reference用
     wav_file: str = ""
     transcript: str = ""
-    # 音声合成用Baseモデル
-    tts_model: str = ""
-
-    def get_tts_model(self) -> str:
-        """音声合成用Baseモデルを返す。"""
-        return self.tts_model or DEFAULT_TTS_MODEL
-
-    def get_voice_design_model(self) -> str:
-        """参照音声生成用VoiceDesignモデルを返す。"""
-        return self.voice_design_model or DEFAULT_VOICE_DESIGN_MODEL
 
 
 @dataclass
@@ -73,10 +68,8 @@ def load_character(yaml_path: str) -> CharacterConfig:
         type=voice_data.get("type", "description"),
         description=voice_data.get("description", VoiceConfig.description),
         sample_text=voice_data.get("sample_text", VoiceConfig.sample_text),
-        voice_design_model=voice_data.get("voice_design_model", ""),
         wav_file=voice_data.get("wav_file", ""),
         transcript=voice_data.get("transcript", ""),
-        tts_model=voice_data.get("tts_model", ""),
     )
 
     config = CharacterConfig(persona=persona, voice=voice)
@@ -122,15 +115,48 @@ class LlmConfig:
     rerank: LlmRerankConfig = field(default_factory=LlmRerankConfig)
 
 
-def load_llm(yaml_path: str) -> LlmConfig:
-    """YAMLファイルからLLM設定を読み込む。"""
+@dataclass
+class TtsConfig:
+    model: str = ""
+    voice_design_model: str = ""
+
+    def get_model(self) -> str:
+        import sys
+        default = DEFAULT_TTS_MODEL if sys.platform == "darwin" else DEFAULT_TTS_MODEL_CPU
+        return self.model or default
+
+    def get_voice_design_model(self) -> str:
+        import sys
+        default = DEFAULT_VOICE_DESIGN_MODEL if sys.platform == "darwin" else DEFAULT_VOICE_DESIGN_MODEL_CPU
+        return self.voice_design_model or default
+
+
+@dataclass
+class AsrConfig:
+    model: str = ""
+
+    def get_model(self) -> str:
+        import sys
+        default = DEFAULT_ASR_MODEL if sys.platform == "darwin" else DEFAULT_ASR_MODEL_CPU
+        return self.model or default
+
+
+@dataclass
+class ModelConfig:
+    llm: LlmConfig = field(default_factory=LlmConfig)
+    tts: TtsConfig = field(default_factory=TtsConfig)
+    asr: AsrConfig = field(default_factory=AsrConfig)
+
+
+def load_model(yaml_path: str) -> ModelConfig:
+    """YAMLファイルからLLM・TTS・ASR設定を読み込む。"""
     path = Path(yaml_path)
     if not path.is_absolute():
         path = SERVER_ROOT / path
 
     if not path.exists():
-        logger.warning(f"LLM設定ファイルが見つかりません: {path}")
-        return LlmConfig()
+        logger.warning(f"モデル設定ファイルが見つかりません: {path}")
+        return ModelConfig()
 
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -147,6 +173,7 @@ def load_llm(yaml_path: str) -> LlmConfig:
         except (TypeError, ValueError):
             return default
 
+    # LLM
     sub_data = data.get("sub", {})
     sub = LlmSubConfig(
         model=sub_data.get("model", ""),
@@ -161,12 +188,8 @@ def load_llm(yaml_path: str) -> LlmConfig:
         api_key=embeddings_data.get("api_key", ""),
         dimensions=_to_int(embeddings_data.get("dimensions", 0), 0),
         bm25_weight=_to_float(embeddings_data.get("bm25_weight", 0.4), 0.4),
-        embedding_weight=_to_float(
-            embeddings_data.get("embedding_weight", 0.3), 0.3
-        ),
-        rerank_weight=_to_float(
-            embeddings_data.get("rerank_weight", 0.3), 0.3
-        ),
+        embedding_weight=_to_float(embeddings_data.get("embedding_weight", 0.3), 0.3),
+        rerank_weight=_to_float(embeddings_data.get("rerank_weight", 0.3), 0.3),
     )
     rerank_data = data.get("rerank", {})
     rerank = LlmRerankConfig(
@@ -175,8 +198,7 @@ def load_llm(yaml_path: str) -> LlmConfig:
         api_key=rerank_data.get("api_key", ""),
         top_n=_to_int(rerank_data.get("top_n", 20), 20),
     )
-
-    config = LlmConfig(
+    llm = LlmConfig(
         model=data.get("model", LlmConfig.model),
         base_url=data.get("base_url", ""),
         api_key=data.get("api_key", ""),
@@ -185,8 +207,24 @@ def load_llm(yaml_path: str) -> LlmConfig:
         embeddings=embeddings,
         rerank=rerank,
     )
-    logger.info(f"LLM設定読み込み完了: {config.model} (base_url: {config.base_url or '(default)'})")
-    return config
+    logger.info(f"LLM設定読み込み完了: {llm.model} (base_url: {llm.base_url or '(default)'})")
+
+    # TTS
+    tts_data = data.get("tts", {})
+    tts = TtsConfig(
+        model=tts_data.get("model", ""),
+        voice_design_model=tts_data.get("voice_design_model", ""),
+    )
+    logger.info(f"TTS設定読み込み完了: {tts.get_model()}")
+
+    # ASR
+    asr_data = data.get("asr", {})
+    asr = AsrConfig(
+        model=asr_data.get("model", ""),
+    )
+    logger.info(f"ASR設定読み込み完了: {asr.get_model()}")
+
+    return ModelConfig(llm=llm, tts=tts, asr=asr)
 
 
 @dataclass
@@ -262,9 +300,6 @@ class Settings(BaseSettings):
         env_file=str(SERVER_ROOT / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
-    # ASR (mlx-audio Qwen3-ASR)
-    asr_model: str = "mlx-community/Qwen3-ASR-0.6B-8bit"
-
     # キャラクター設定ファイル
     character_file: str = "configs/character.yaml"
     # REST/CLI向けキャラクターカタログ設定
@@ -306,7 +341,12 @@ class Settings(BaseSettings):
 settings = Settings()
 character = load_character(settings.character_file)
 prompt_config = load_prompt(settings.prompt_file)
-llm_config = load_llm("configs/llm.yaml")
+_model_config = load_model("configs/model.yaml")
+
+# 後方互換エイリアス
+llm_config = _model_config.llm
+tts_config = _model_config.tts
+asr_config = _model_config.asr
 
 
 def character_data_path(filename: str) -> str:
