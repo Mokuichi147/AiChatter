@@ -105,32 +105,32 @@ rerank:
 
 ```bash
 cd server
-uv run python main.py
+uv run ai-chatter server
 ```
 
 #### オプション
 
 ```bash
 # キャラクター指定
-uv run python main.py -c character_custom.yaml
+uv run ai-chatter server -c character_custom.yaml
 
 # グループモード（話者識別有効）
-uv run python main.py --group
+uv run ai-chatter server --group
 ```
 
-### CLI経由での起動
+### CLIモード（テキスト対話）
 
 ```bash
 cd server
 
-# CLIモード（テキスト対話）
-uv run python cli.py chat --stream
+# 対話モード
+uv run ai-chatter chat --stream
 
 # サーバー起動
-uv run python cli.py server -c 'character*.yaml'
+uv run ai-chatter server -c 'character*.yaml'
 
 # グループモードでサーバー起動
-uv run python cli.py server --group
+uv run ai-chatter server --group
 ```
 
 ### ファームウェアビルド
@@ -174,7 +174,7 @@ curl http://127.0.0.1:8765/api/v1/characters
 
 ```python
 import asyncio
-from aichatter import create_runtime
+from ai_chatter.aichatter import create_runtime
 
 async def main():
     runtime = await create_runtime()

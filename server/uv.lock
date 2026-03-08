@@ -18,7 +18,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ai-chatter-server"
+name = "ai-chatter"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
