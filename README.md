@@ -35,7 +35,7 @@ M5StickS3 (ESP32-S3)          PCサーバー (Python + uv)
 - M5StickS3 (ESP32-S3)
 - Python 3.10+ / uv
 - ESP-IDF 5.3
-- OpenAI Responses API互換のLLMサーバー（Ollama等）
+- OpenAI Responses API互換のLLMサーバー（LM Studio、Ollama等）
 
 ### サーバー準備
 
@@ -80,8 +80,8 @@ voice:
 
 ```yaml
 # メインLLM（Responses API互換）
-model: "qwen2.5:7b"
-base_url: "http://localhost:11434/v1"
+model: "qwen3.5-27b"
+base_url: "http://localhost:1234/v1"
 api_key: ""
 
 # サブエージェントLLM（省略時はメインと同じ）
@@ -91,7 +91,7 @@ sub:
 
 # Embedding API（メモリ検索の精度向上、省略可）
 embeddings:
-  model: "text-embedding-3-small"
+  model: "text-embedding-qwen3-embedding-0.6b"
   base_url: ""
   dimensions: 0
 

@@ -1,6 +1,6 @@
 # メインLLM設定
-model: "gpt-4o"
-base_url: "http://localhost:11434/v1"
+model: "qwen3.5-27b"
+base_url: "http://localhost:1234/v1"
 api_key: ""                # 空なら "no-key" をフォールバック
 reasoning: ""              # low, medium, high (空=未指定)
 
