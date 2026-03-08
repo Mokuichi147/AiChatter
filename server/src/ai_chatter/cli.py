@@ -130,6 +130,48 @@ def _apply_server_character_selection(values: list[str] | None) -> None:
     )
 
 
+async def _run_voice(args: argparse.Namespace) -> None:
+    from ai_chatter.local_asr import LocalASR
+    from ai_chatter.local_llm import LocalLLM
+    from ai_chatter.local_tts import LocalTTS
+    from ai_chatter.voice_cli import VoiceCLI
+
+    _apply_server_character_selection(args.character)
+
+    if args.group:
+        settings.conversation_mode = "group"
+
+    logger.info("AIモデルをプリロード中...")
+    asr = LocalASR()
+    llm = LocalLLM()
+    tts = LocalTTS()
+    logger.info("AIモデルプリロード完了")
+
+    speaker_id = None
+    if settings.conversation_mode == "group":
+        from ai_chatter.config import character_data_path
+        from ai_chatter.speaker_id import SpeakerIdentifier
+
+        speakers_path = character_data_path("speakers.json")
+        speaker_id = SpeakerIdentifier(
+            speakers_path,
+            similarity_threshold=settings.speaker_similarity_threshold,
+        )
+        logger.info("話者識別モジュール初期化完了 (グループモード)")
+
+    tool_registry, skill_provider = _build_tools()
+
+    voice = VoiceCLI(
+        asr=asr,
+        llm=llm,
+        tts=tts,
+        tool_registry=tool_registry,
+        skill_provider=skill_provider,
+        speaker_id=speaker_id,
+    )
+    await voice.run()
+
+
 async def _run_chat(args: argparse.Namespace) -> None:
     from ai_chatter.chat_engine import ChatEngine
     from ai_chatter.local_llm import LocalLLM
@@ -240,6 +282,22 @@ def main() -> None:
     chat_parser.add_argument("--session-id", default="cli")
     chat_parser.add_argument("--stream", action="store_true", help="ストリーミング表示")
 
+    voice_parser = subparsers.add_parser("voice", help="音声対話CLIモード (PCマイク/スピーカー)")
+    voice_parser.add_argument(
+        "-c",
+        "--character",
+        nargs="+",
+        help=(
+            "デフォルトキャラクターファイルまたはglobパターン。"
+            "例: -c character.yaml / -c 'character*.yaml'"
+        ),
+    )
+    voice_parser.add_argument(
+        "--group",
+        action="store_true",
+        help="グループモードで起動する（複数人会話・話者識別を有効化）",
+    )
+
     server_parser = subparsers.add_parser("server", help="サーバー起動モード")
     server_parser.add_argument(
         "-c",
@@ -257,7 +315,7 @@ def main() -> None:
     )
 
     # 互換性: サブコマンド未指定時は chat 扱い
-    if len(sys.argv) > 1 and sys.argv[1] in {"chat", "server", "-h", "--help"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"chat", "voice", "server", "-h", "--help"}:
         ns = parser.parse_args()
     else:
         ns = chat_parser.parse_args(sys.argv[1:])
@@ -265,6 +323,8 @@ def main() -> None:
 
     if ns.command == "server":
         _run_server(ns)
+    elif ns.command == "voice":
+        asyncio.run(_run_voice(ns))
     else:
         asyncio.run(_run_chat(ns))
 

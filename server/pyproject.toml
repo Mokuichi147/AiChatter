@@ -23,6 +23,7 @@ dependencies = [
     "resvg-py>=0.2.6",
     "transformers>=4.30.0",
     "torch>=2.0.0",
+    "sounddevice>=0.4.6",
 ]
 
 [project.scripts]
