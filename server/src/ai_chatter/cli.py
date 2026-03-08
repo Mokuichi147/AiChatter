@@ -154,10 +154,10 @@ async def _run_chat(args: argparse.Namespace) -> None:
 
     catalog = CharacterCatalog(settings.character_dir, settings.character_glob)
     catalog.reload()
-    if not catalog.list_entries():
+    default_name = Path(settings.character_file).name
+    if not catalog.has(default_name):
         catalog.register_file(settings.character_file)
-
-    character_id = catalog.list_entries()[0].character_id
+    character_id = default_name
 
     history_mode = (args.history_mode or settings.default_history_mode).strip().lower()
     if history_mode not in ALLOWED_HISTORY_MODES:
