@@ -131,6 +131,21 @@ async def _run_voice(args: argparse.Namespace) -> None:
     await voice.run()
 
 
+def _play_tts(tts, text: str) -> None:
+    """TTS合成してスピーカーで再生する。"""
+    import numpy as np
+    import sounddevice as sd
+
+    _TTS_SAMPLE_RATE = 16000
+    _PC_VOLUME_AMPLIFY = 10.0
+
+    for pcm in tts.synthesize_chunks(text):
+        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        audio = np.clip(audio * _PC_VOLUME_AMPLIFY, -1.0, 1.0)
+        sd.play(audio, samplerate=_TTS_SAMPLE_RATE)
+        sd.wait()
+
+
 async def _run_chat(args: argparse.Namespace) -> None:
     from ai_chatter.chat_engine import ChatEngine
     from ai_chatter.local_llm import LocalLLM
@@ -149,6 +164,12 @@ async def _run_chat(args: argparse.Namespace) -> None:
         raise ValueError(
             f"history-mode は {sorted(ALLOWED_HISTORY_MODES)} のいずれかを指定してください"
         )
+
+    tts = None
+    if args.voice:
+        from ai_chatter.local_tts import LocalTTS
+
+        tts = LocalTTS()
 
     llm = LocalLLM()
     tool_registry, skill_provider = _build_tools()
@@ -172,6 +193,7 @@ async def _run_chat(args: argparse.Namespace) -> None:
         character_id=character_id,
     )
 
+    loop = asyncio.get_event_loop()
     chosen = catalog.get(character_id)
     chosen_name = chosen.config.persona.name or chosen.file_name
     print(f"\nCLI会話を開始します。session_id={session_id}, character={chosen_name} ({character_id})")
@@ -196,14 +218,22 @@ async def _run_chat(args: argparse.Namespace) -> None:
 
             if args.stream:
                 print(f"{chosen_name}> ", end="", flush=True)
+                full_response = ""
                 async for event in engine.stream_chat(session_id=session_id, text=user_text):
                     if event.get("type") == "chunk":
-                        print(event.get("text", ""), end="", flush=True)
+                        chunk_text = event.get("text", "")
+                        full_response += chunk_text
+                        print(chunk_text, end="", flush=True)
                     elif event.get("type") == "done":
                         print()
+                if tts and full_response:
+                    await loop.run_in_executor(None, _play_tts, tts, full_response)
             else:
                 result = await engine.chat(session_id=session_id, text=user_text)
-                print(f"{chosen_name}> {result.get('text', '')}")
+                reply = result.get("text", "")
+                print(f"{chosen_name}> {reply}")
+                if tts and reply:
+                    await loop.run_in_executor(None, _play_tts, tts, reply)
     except KeyboardInterrupt:
         print()
 
@@ -254,6 +284,7 @@ def main() -> None:
     )
     chat_parser.add_argument("--session-id", default="cli")
     chat_parser.add_argument("--stream", action="store_true", help="ストリーミング表示")
+    chat_parser.add_argument("--voice", action="store_true", help="返答をTTS音声で再生")
     chat_parser.add_argument("--debug", action="store_true", help="デバッグログを表示")
 
     voice_parser = subparsers.add_parser("voice", help="音声対話CLIモード (PCマイク/スピーカー)")
