@@ -13,10 +13,6 @@ from ai_chatter.config import settings
 from ai_chatter.session_manager import ALLOWED_HISTORY_MODES, SessionManager
 from ai_chatter.tool_factory import ToolFactory
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -258,6 +254,7 @@ def main() -> None:
     )
     chat_parser.add_argument("--session-id", default="cli")
     chat_parser.add_argument("--stream", action="store_true", help="ストリーミング表示")
+    chat_parser.add_argument("--debug", action="store_true", help="デバッグログを表示")
 
     voice_parser = subparsers.add_parser("voice", help="音声対話CLIモード (PCマイク/スピーカー)")
     voice_parser.add_argument(
@@ -274,6 +271,7 @@ def main() -> None:
         action="store_true",
         help="グループモードで起動する（複数人会話・話者識別を有効化）",
     )
+    voice_parser.add_argument("--debug", action="store_true", help="デバッグログを表示")
 
     server_parser = subparsers.add_parser("server", help="サーバー起動モード")
     server_parser.add_argument(
@@ -297,6 +295,18 @@ def main() -> None:
     else:
         ns = chat_parser.parse_args(sys.argv[1:])
         ns.command = "chat"
+
+    # chat/voice は --debug 指定時のみログ表示、server は常に表示
+    if ns.command == "server":
+        log_level = logging.INFO
+    elif getattr(ns, "debug", False):
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
     try:
         if ns.command == "server":
