@@ -304,10 +304,8 @@ class ChatEngine:
                 "type": entry.config.voice.type,
                 "description": entry.config.voice.description,
                 "sample_text": entry.config.voice.sample_text,
-                "voice_design_model": entry.config.voice.voice_design_model,
                 "wav_file": entry.config.voice.wav_file,
                 "transcript": entry.config.voice.transcript,
-                "tts_model": entry.config.voice.tts_model,
             },
         }
 
