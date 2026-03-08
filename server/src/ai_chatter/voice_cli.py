@@ -442,7 +442,7 @@ class VoiceCLI:
                     pipeline_task = None
                     print("🎤 聞いています...", end="", flush=True)
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n\n音声対話を終了しました。")
         finally:
             if utterance_waiter and not utterance_waiter.done():

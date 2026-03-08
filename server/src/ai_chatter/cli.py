@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import glob
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -216,28 +217,35 @@ async def _run_chat(args: argparse.Namespace) -> None:
     print(f"\nCLI会話を開始します。session_id={session_id}, character={chosen_name} ({character_id})")
     print("終了するには 'exit' または 'quit' を入力してください。\n")
 
-    while True:
-        try:
-            user_text = input("you> ").strip()
-        except EOFError:
-            print()
-            break
+    # asyncio の SIGINT ハンドラを無効化し、input() が Ctrl+C で
+    # 即座に KeyboardInterrupt を受け取れるようにする
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
-        if not user_text:
-            continue
-        if user_text.lower() in {"exit", "quit"}:
-            break
+    try:
+        while True:
+            try:
+                user_text = input("you> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
 
-        if args.stream:
-            print("ai> ", end="", flush=True)
-            async for event in engine.stream_chat(session_id=session_id, text=user_text):
-                if event.get("type") == "chunk":
-                    print(event.get("text", ""), end="", flush=True)
-                elif event.get("type") == "done":
-                    print()
-        else:
-            result = await engine.chat(session_id=session_id, text=user_text)
-            print(f"ai> {result.get('text', '')}")
+            if not user_text:
+                continue
+            if user_text.lower() in {"exit", "quit"}:
+                break
+
+            if args.stream:
+                print("ai> ", end="", flush=True)
+                async for event in engine.stream_chat(session_id=session_id, text=user_text):
+                    if event.get("type") == "chunk":
+                        print(event.get("text", ""), end="", flush=True)
+                    elif event.get("type") == "done":
+                        print()
+            else:
+                result = await engine.chat(session_id=session_id, text=user_text)
+                print(f"ai> {result.get('text', '')}")
+    except KeyboardInterrupt:
+        print()
 
 
 def _run_server(args: argparse.Namespace) -> None:
@@ -321,12 +329,15 @@ def main() -> None:
         ns = chat_parser.parse_args(sys.argv[1:])
         ns.command = "chat"
 
-    if ns.command == "server":
-        _run_server(ns)
-    elif ns.command == "voice":
-        asyncio.run(_run_voice(ns))
-    else:
-        asyncio.run(_run_chat(ns))
+    try:
+        if ns.command == "server":
+            _run_server(ns)
+        elif ns.command == "voice":
+            asyncio.run(_run_voice(ns))
+        else:
+            asyncio.run(_run_chat(ns))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
