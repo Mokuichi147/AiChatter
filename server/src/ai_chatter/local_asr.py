@@ -85,6 +85,8 @@ class LocalASR:
         try:
             sf.write(tmp_path, audio, 16000)
             results = self._model.transcribe(audio=tmp_path, language=language)
-            return results[0].text.strip() if results and results[0].text else ""
+            if not results or not results[0].text:
+                return ""
+            return results[0].text.strip()
         finally:
             os.unlink(tmp_path)
