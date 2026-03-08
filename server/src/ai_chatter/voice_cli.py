@@ -363,10 +363,19 @@ class VoiceCLI:
 
         # 会話履歴を更新
         if full_response:
+            from datetime import datetime
+
+            from ai_chatter._paths import save_history
+
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             self._history.append({"role": "user", "content": user_text})
             self._history.append({"role": "assistant", "content": full_response})
             if len(self._history) > 20:
                 self._history = self._history[-20:]
+            save_history([
+                {"role": "user", "content": user_text, "created_at": now_str},
+                {"role": "assistant", "content": full_response, "created_at": now_str},
+            ])
 
     async def run(self) -> None:
         """音声対話メインループ。

@@ -6,6 +6,7 @@ import glob
 import logging
 import signal
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from ai_chatter.character_catalog import CharacterCatalog
@@ -228,12 +229,22 @@ async def _run_chat(args: argparse.Namespace) -> None:
                         print()
                 if tts and full_response:
                     await loop.run_in_executor(None, _play_tts, tts, full_response)
+                reply = full_response
             else:
                 result = await engine.chat(session_id=session_id, text=user_text)
                 reply = result.get("text", "")
                 print(f"{chosen_name}> {reply}")
                 if tts and reply:
                     await loop.run_in_executor(None, _play_tts, tts, reply)
+
+            if reply:
+                from ai_chatter._paths import save_history
+
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                save_history([
+                    {"role": "user", "content": user_text, "created_at": now_str},
+                    {"role": "assistant", "content": reply, "created_at": now_str},
+                ])
     except KeyboardInterrupt:
         print()
 

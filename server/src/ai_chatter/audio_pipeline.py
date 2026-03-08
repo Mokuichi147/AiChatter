@@ -13,10 +13,10 @@ from ai_chatter.local_asr import LocalASR
 from ai_chatter.local_llm import LocalLLM, TextChunk, ToolCallRequest
 from ai_chatter.local_tts import LocalTTS
 from ai_chatter import config
-from ai_chatter.config import character_data_path, prompt_config, settings
+from ai_chatter.config import prompt_config, settings
 from ai_chatter.skills import SkillProvider
 from ai_chatter.speaker_id import SpeakerIdentifier
-from ai_chatter._paths import SERVER_ROOT
+from ai_chatter._paths import SERVER_ROOT, history_path, save_history
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +82,9 @@ class AudioPipeline:
         self._pending_user_text: Optional[str] = None
 
     @staticmethod
-    def _history_path() -> Path:
-        path = Path(character_data_path("history.json"))
-        if not path.is_absolute():
-            path = SERVER_ROOT / path
-        return path
-
-    @staticmethod
     def _load_history() -> list[dict]:
         """永続化された会話履歴から直近N往復を復元する。"""
-        path = AudioPipeline._history_path()
+        path = history_path()
         if not path.exists():
             return []
         try:
@@ -115,22 +108,6 @@ class AudioPipeline:
             return history
         cls._cached_history = None
         return cls._load_history()
-
-    def _save_history(self, new_entries: list[dict]) -> None:
-        """新しい会話エントリをファイルに追記する。"""
-        path = self._history_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            existing = []
-            if path.exists():
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            existing.extend(new_entries)
-            path.write_text(
-                json.dumps(existing, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            logger.warning(f"会話履歴の保存失敗: {e}")
 
     def _next_seq(self) -> int:
         self._seq = (self._seq + 1) & 0xFFFF
@@ -420,7 +397,7 @@ class AudioPipeline:
                 self._history.append(user_entry)
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
-                self._save_history([user_entry])
+                save_history([user_entry])
             elif full_response:
                 assistant_entry: dict = {"role": "assistant", "content": full_response, "created_at": now_str}
                 self._history.append(user_entry)
@@ -428,7 +405,7 @@ class AudioPipeline:
                 # メモリ上は直近分のみ保持、ファイルには全件蓄積
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
-                self._save_history([user_entry, assistant_entry])
+                save_history([user_entry, assistant_entry])
 
     async def _run_pipeline(self, audio_data: bytes) -> None:
         tts_end_sent = False
