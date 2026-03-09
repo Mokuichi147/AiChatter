@@ -361,13 +361,11 @@ class VoiceCLI:
 
         print()
 
-        # 会話履歴を更新
+        # 会話履歴を更新（割り込み時でも認識結果と生成済み応答を記録する）
+        from ai_chatter._paths import save_history
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         if full_response:
-            from datetime import datetime
-
-            from ai_chatter._paths import save_history
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             self._history.append({"role": "user", "content": user_text})
             self._history.append({"role": "assistant", "content": full_response})
             if len(self._history) > 20:
@@ -376,6 +374,16 @@ class VoiceCLI:
                 {"role": "user", "content": user_text, "created_at": now_str},
                 {"role": "assistant", "content": full_response, "created_at": now_str},
             ])
+        elif self._interrupted:
+            # 割り込み: LLM応答なし（ASR→LLM間で割り込まれた場合）
+            # ユーザー発言のみ記録して文脈を維持する
+            self._history.append({"role": "user", "content": user_text})
+            if len(self._history) > 20:
+                self._history = self._history[-20:]
+            save_history([
+                {"role": "user", "content": user_text, "created_at": now_str},
+            ])
+            logger.info("割り込み: ユーザー発言のみ履歴に記録")
 
     async def run(self) -> None:
         """音声対話メインループ。
