@@ -1,22 +1,24 @@
-# AiChatter - M5StickS3 常時会話AI音声アシスタント
+# AiChatter - PC常時会話AI音声アシスタント
 
-M5StickS3をバージイン対応の常時会話型AI音声アシスタントにするプロジェクト。
+PCで動作するバージイン対応の常時会話型AI音声アシスタント。
 すべてのAI処理はローカル実行（クラウドAPI不使用）。
 
 ## アーキテクチャ
 
 ```
-M5StickS3 (ESP32-S3)          PCサーバー (Python + uv)
-┌───────────────────┐         ┌────────────────────────────────┐
-│ ES8311 全二重音声 │◄──WS────│ FastAPI WebSocket               │
-│ ESP-SR AFE        │  PCM    │ AudioPipeline                   │
-│ (AEC + VAD)       │         │  ├── Qwen3-ASR (ASR / mlx)     │
-│ ステートマシン     │         │  ├── Responses API互換LLM        │
-│ LCD表示           │         │  ├── Qwen3-TTS (TTS / mlx)     │
-│                   │         │  ├── ツール (記憶/通知/検索等)   │
-│                   │         │  └── 話者識別 (WavLM-XVector)   │
-└───────────────────┘         └────────────────────────────────┘
+PCサーバー (Python + uv)
+┌────────────────────────────────┐
+│ FastAPI WebSocket / REST API   │
+│ AudioPipeline                  │
+│  ├── Qwen3-ASR (ASR / mlx)    │
+│  ├── Responses API互換LLM      │
+│  ├── Qwen3-TTS (TTS / mlx)    │
+│  ├── ツール (記憶/通知/検索等)  │
+│  └── 話者識別 (WavLM-XVector)  │
+└────────────────────────────────┘
 ```
+
+M5StickS3をクライアントとして接続することも可能です。→ [M5StickS3連携ガイド](docs/m5sticks3.md)
 
 ## 主な機能
 
@@ -27,14 +29,13 @@ M5StickS3 (ESP32-S3)          PCサーバー (Python + uv)
 - **スキル動的注入**: ユーザー発言に応じてツール使用ガイドとメモリを自動でプロンプトに注入
 - **サブエージェント**: 時間のかかる調査をバックグラウンドで実行し結果を通知
 - **グループモード**: 声紋で話者を識別し、複数人会話に対応（`--group`フラグで有効化）
-- **REST API / CLI / SDK**: M5StickS3未接続でもテキストベースで利用可能
+- **REST API / CLI / SDK**: テキストベースでも利用可能
 
 ## セットアップ
 
 ### 必要なもの
-- M5StickS3 (ESP32-S3)
+
 - Python 3.10+ / uv
-- ESP-IDF 5.3
 - OpenAI Responses API互換のLLMサーバー（LM Studio、Ollama等）
 
 ### サーバー準備
@@ -133,21 +134,6 @@ uv run ai-chatter server -c 'character*.yaml'
 uv run ai-chatter server --group
 ```
 
-### ファームウェアビルド
-
-```bash
-# ESP-IDF環境をロード
-source ~/esp/esp-idf/export.sh
-
-cd firmware
-
-# WiFi/サーバーIP設定
-nano main/config.h
-
-idf.py set-target esp32s3
-idf.py build
-```
-
 ### REST API
 
 ```bash
@@ -221,59 +207,3 @@ LLMが自動で使用するツールとして、以下が利用可能です:
 | `display_image` | 画面に画像表示 | M5接続時 |
 | `run_subagent_research` | バックグラウンド調査 | サブエージェント有効時 |
 | `register_speaker` | 話者の声を登録 | グループモード時 |
-
-## WebSocketプロトコル（7バイトバイナリヘッダー）
-
-| type  | 方向           | 意味              |
-|-------|----------------|-------------------|
-| 0x01  | ESP32 → Server | 音声チャンク       |
-| 0x11  | ESP32 → Server | 発話終了(EOS)      |
-| 0x12  | ESP32 → Server | バージイン割り込み  |
-| 0x13  | ESP32 → Server | ボタン押下         |
-| 0x02  | Server → ESP32 | TTS音声チャンク    |
-| 0x03  | Server → ESP32 | TTS終了            |
-| 0x04  | Server → ESP32 | スリープ指示       |
-| 0x05  | Server → ESP32 | ウェイク指示       |
-| 0x20  | Server → ESP32 | テキスト表示       |
-| 0x21  | Server → ESP32 | 画像ブロック表示   |
-
-ヘッダー構造: `[type:1][seq:2][payload_len:4]` (ビッグエンディアン)
-
-## 音声フォーマット
-- サンプルレート: 16kHz
-- ビット深度: 16bit signed PCM
-- チャンネル: mono
-- チャンクサイズ: 512サンプル (32ms)
-
-## ハードウェアピン（M5StickS3）
-
-| 機能 | GPIO |
-|------|------|
-| I2S MCLK | 18 |
-| I2S BCLK | 17 |
-| I2S WS | 15 |
-| I2S DOUT | 14 |
-| I2S DIN | 16 |
-| I2C SDA (内部) | 47 |
-| I2C SCL (内部) | 48 |
-| I2C SDA (Grove) | 9 |
-| I2C SCL (Grove) | 10 |
-| ボタンA (フロント) | 11 |
-| ボタンB (サイド/電源) | 12 |
-| LCD MOSI | 39 |
-| LCD SCLK | 40 |
-| LCD CS | 41 |
-| LCD DC | 45 |
-| LCD RST | 21 |
-| LCD BL | 38 |
-| IR送信 | 46 |
-| IR受信 | 42 |
-
-## LCD状態表示
-
-| 色     | 状態       |
-|--------|-----------|
-| 黒     | IDLE       |
-| 青     | LISTENING  |
-| 黄     | PROCESSING |
-| 緑     | SPEAKING   |
