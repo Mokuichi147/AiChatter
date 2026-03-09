@@ -119,19 +119,33 @@ uv run ai-chatter server -c character_custom.yaml
 uv run ai-chatter server --group
 ```
 
+### CLIモード（音声対話）
+
+PCのマイク/スピーカーを使って音声で対話します。
+
+```bash
+cd server
+
+# 音声対話モード
+uv run ai-chatter voice
+
+# キャラクター指定
+uv run ai-chatter voice -c character_custom.yaml
+
+# グループモード（話者識別有効）
+uv run ai-chatter voice --group
+```
+
 ### CLIモード（テキスト対話）
 
 ```bash
 cd server
 
-# 対話モード
+# テキスト対話モード（ストリーミング表示）
 uv run ai-chatter chat --stream
 
-# サーバー起動
-uv run ai-chatter server -c 'character*.yaml'
-
-# グループモードでサーバー起動
-uv run ai-chatter server --group
+# TTS音声で返答を再生しながらテキスト対話
+uv run ai-chatter chat --stream --voice
 ```
 
 ### REST API
