@@ -45,7 +45,7 @@ cd server
 uv sync
 cp .env.example .env
 cp configs/character.example.yaml configs/character.yaml
-cp configs/llm.example.yaml configs/llm.yaml
+cp configs/model.example.yaml configs/model.yaml
 cp configs/prompt.example.yaml configs/prompt.yaml
 ```
 
@@ -55,7 +55,7 @@ cp configs/prompt.example.yaml configs/prompt.yaml
 |---------|------|
 | `.env` | ASRモデル、APIキー、サーバーポート等 |
 | `configs/character.yaml` | キャラクター（人格・声）の定義 |
-| `configs/llm.yaml` | LLM・Embedding・Rerankの接続設定 |
+| `configs/model.yaml` | LLM・TTS・ASR・Embedding・Rerankの設定 |
 | `configs/prompt.yaml` | 出力ルール・ツールガイド・スキル定義 |
 
 #### キャラクター設定 (`configs/character.yaml`)
@@ -77,29 +77,43 @@ voice:
   # transcript: "参照音声に対応するテキスト"
 ```
 
-#### LLM設定 (`configs/llm.yaml`)
+#### モデル設定 (`configs/model.yaml`)
 
 ```yaml
 # メインLLM（Responses API互換）
 model: "qwen3.5-27b"
 base_url: "http://localhost:1234/v1"
 api_key: ""
+reasoning: ""              # low, medium, high (空=未指定)
 
 # サブエージェントLLM（省略時はメインと同じ）
 sub:
   model: ""
   base_url: ""
+  api_key: ""
+  reasoning: ""
 
 # Embedding API（メモリ検索の精度向上、省略可）
 embeddings:
-  model: "text-embedding-qwen3-embedding-0.6b"
+  model: ""
   base_url: ""
+  api_key: ""
   dimensions: 0
 
 # Rerank API（検索結果の再順位付け、省略可）
 rerank:
-  model: "jina-reranker-v2-base-multilingual"
+  model: ""
   base_url: ""
+  api_key: ""
+
+# TTS設定（省略時はプラットフォームに応じたデフォルト値を使用）
+tts:
+  model: ""
+  voice_design_model: ""
+
+# ASR設定（省略時はプラットフォームに応じたデフォルト値を使用）
+asr:
+  model: ""
 ```
 
 ### サーバー起動
