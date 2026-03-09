@@ -187,7 +187,13 @@ class AudioPipeline:
             return False
 
     async def _synthesize_and_send(self, sentence: str) -> None:
-        """テキストをTTS合成してWebSocketで送信する。"""
+        """テキストをTTS合成してWebSocketで送信する。
+
+        処理を3フェーズに分離しGPUロックの保持時間を最小化:
+        1. テキスト前処理（CPU: GPUロック外）
+        2. TTS推論（GPU: GPUロック内）
+        3. オーディオ後処理 + 送信（CPU: GPUロック外）
+        """
         # 改行が含まれる場合は行単位で分割して順に合成する
         segments = [sentence]
         if "\n" in sentence or "\r" in sentence:
@@ -195,28 +201,61 @@ class AudioPipeline:
 
         loop = asyncio.get_event_loop()
         for segment in segments:
+            if self._interrupted or self._ws_closed:
+                break
+
+            t0 = time.monotonic()
+
+            # Phase 1: テキスト前処理（GPUロック外）
+            prepared = await loop.run_in_executor(
+                None, self.tts.prepare_text, segment,
+            )
+            if not prepared:
+                continue
+
+            t1 = time.monotonic()
+
+            # Phase 2: TTS推論のみ（GPUロック内）
             async with _gpu_lock:
                 done_event = threading.Event()
-                def _tts_work(s=segment):
+                def _tts_work(t=prepared):
                     try:
-                        return list(self.tts.synthesize_chunks(s))
+                        return self.tts.synthesize_raw(t)
                     finally:
                         done_event.set()
                 try:
-                    chunks = await loop.run_in_executor(None, _tts_work)
+                    raw_segments = await loop.run_in_executor(None, _tts_work)
                 except asyncio.CancelledError:
                     done_event.wait(timeout=30)
                     raise
-            for chunk in chunks:
-                if self._interrupted or self._ws_closed:
-                    break
-                offset = 0
-                while offset < len(chunk):
-                    part = chunk[offset : offset + MAX_CHUNK]
-                    header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(part))
-                    if not await self._safe_send(header + part):
-                        return
-                    offset += MAX_CHUNK
+            if not raw_segments:
+                continue
+
+            t2 = time.monotonic()
+
+            # Phase 3: 後処理 + 送信（GPUロック外）
+            pcm = await loop.run_in_executor(
+                None, self.tts.postprocess_audio, raw_segments,
+            )
+
+            t3 = time.monotonic()
+            logger.debug(
+                f"TTS計測 '{segment[:20]}': "
+                f"前処理={t1-t0:.3f}s, 推論={t2-t1:.3f}s, 後処理={t3-t2:.3f}s, "
+                f"合計={t3-t0:.3f}s"
+            )
+
+            if not pcm:
+                continue
+            if self._interrupted or self._ws_closed:
+                break
+            offset = 0
+            while offset < len(pcm):
+                part = pcm[offset : offset + MAX_CHUNK]
+                header = make_header(MSG_TTS_CHUNK, self._next_seq(), len(part))
+                if not await self._safe_send(header + part):
+                    return
+                offset += MAX_CHUNK
 
     def _build_system_prompt(
         self, skill_context: str = "", extra_instruction: str = "",

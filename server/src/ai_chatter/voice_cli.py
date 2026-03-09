@@ -300,25 +300,30 @@ class VoiceCLI:
                     full_response += text
                     print(text, end="", flush=True)
 
-                    # TTS合成して再生
-                    async with self._gpu_lock:
-                        done_event = threading.Event()
-                        def _tts_work(s=text):
+                    # TTS合成して再生（GPUロック範囲を最小化）
+                    prepared = await loop.run_in_executor(
+                        None, self.tts.prepare_text, text,
+                    )
+                    if prepared:
+                        async with self._gpu_lock:
+                            done_event = threading.Event()
+                            def _tts_work(t=prepared):
+                                try:
+                                    return self.tts.synthesize_raw(t)
+                                finally:
+                                    done_event.set()
                             try:
-                                return list(self.tts.synthesize_chunks(s))
-                            finally:
-                                done_event.set()
-                        try:
-                            chunks = await loop.run_in_executor(None, _tts_work)
-                        except asyncio.CancelledError:
-                            done_event.wait(timeout=30)
-                            raise
+                                raw_segments = await loop.run_in_executor(None, _tts_work)
+                            except asyncio.CancelledError:
+                                done_event.wait(timeout=30)
+                                raise
 
-                    for chunk in chunks:
-                        if self._interrupted:
-                            sd.stop()
-                            break
-                        await self._play_audio(chunk)
+                        if raw_segments:
+                            pcm = await loop.run_in_executor(
+                                None, self.tts.postprocess_audio, raw_segments,
+                            )
+                            if pcm and not self._interrupted:
+                                await self._play_audio(pcm)
 
                 elif isinstance(event, ToolCallRequest):
                     tool_call_requests.append(event)

@@ -40,6 +40,9 @@ _KANJI_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF]")
 
 def _to_reading(text: str) -> str:
     """漢字を含むトークンをカタカナの読みに変換する。"""
+    # 漢字が含まれなければ形態素解析をスキップ
+    if not _KANJI_RE.search(text):
+        return text
     morphemes = _sudachi_tokenizer.tokenize(text, SplitMode.C)
     parts: list[str] = []
     for m in morphemes:
@@ -303,45 +306,32 @@ class LocalTTS:
             logger.warning(f"音量設定の読み込みに失敗: {e}")
         return DEFAULT_VOLUME_SCALE
 
-    def synthesize_chunks(self, text: str) -> Iterator[bytes]:
-        """バッチTTS: 全音声を結合→一括リサンプル→PCM変換"""
-        # 絵文字等TTS不可文字を除去
+    def prepare_text(self, text: str) -> str | None:
+        """TTS前処理: 不合成文字除去・漢字読み変換（CPU処理、GPUロック不要）。"""
         text = _SPEAKABLE_RE.sub("", text).strip()
         if not text:
-            return
-        # 漢字を読みに変換（読み間違い防止）
+            return None
         text = _to_reading(text)
         if not text:
-            return
-        # 句読点・記号のみで発音可能文字がない場合はスキップ
+            return None
         if not re.search(
             r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF"
             r"a-zA-Zａ-ｚＡ-Ｚ0-9０-９]",
             text,
         ):
-            return
+            return None
+        return text
 
+    def synthesize_raw(self, text: str) -> list[np.ndarray] | None:
+        """TTS推論: 前処理済みテキストから生オーディオセグメントを生成（GPU処理）。"""
         if self._backend == "mlx":
-            yield from self._synthesize_mlx(text)
+            return self._generate_raw_mlx(text)
         else:
-            yield from self._synthesize_qwen_tts(text)
+            return self._generate_raw_qwen_tts(text)
 
-    def _synthesize_mlx(self, text: str) -> Iterator[bytes]:
+    def postprocess_audio(self, segments: list[np.ndarray]) -> bytes | None:
+        """後処理: リサンプル・正規化・PCM変換（CPU処理、GPUロック不要）。"""
         try:
-            segments = []
-            for result in self._model.generate(
-                text=text,
-                ref_audio=self.ref_audio,
-                ref_text=self.ref_text,
-                lang_code="Japanese",
-            ):
-                if result.audio is None:
-                    continue
-                segments.append(np.array(result.audio, dtype=np.float32))
-
-            if not segments:
-                return
-
             audio_np = np.concatenate(segments)
 
             if self._model_sample_rate != TARGET_SAMPLE_RATE:
@@ -354,41 +344,53 @@ class LocalTTS:
                 audio_np = audio_np / peak
 
             pcm = (audio_np * self.volume_scale).astype(np.int16).tobytes()
-            if not pcm:
-                return
+            return pcm if pcm else None
+        except Exception as e:
+            logger.error(f"TTS後処理エラー: {e}", exc_info=True)
+            return None
+
+    def synthesize_chunks(self, text: str) -> Iterator[bytes]:
+        """バッチTTS: 前処理→推論→後処理を一括実行（後方互換用）。"""
+        prepared = self.prepare_text(text)
+        if not prepared:
+            return
+        raw = self.synthesize_raw(prepared)
+        if not raw:
+            return
+        pcm = self.postprocess_audio(raw)
+        if pcm:
             yield pcm
 
+    def _generate_raw_mlx(self, text: str) -> list[np.ndarray] | None:
+        try:
+            segments = []
+            for result in self._model.generate(
+                text=text,
+                ref_audio=self.ref_audio,
+                ref_text=self.ref_text,
+                lang_code="Japanese",
+            ):
+                if result.audio is None:
+                    continue
+                segments.append(np.array(result.audio, dtype=np.float32))
+            return segments if segments else None
         except Exception as e:
             logger.error(f"TTS合成エラー (mlx): {e}", exc_info=True)
+            return None
 
-    def _synthesize_qwen_tts(self, text: str) -> Iterator[bytes]:
+    def _generate_raw_qwen_tts(self, text: str) -> list[np.ndarray] | None:
         try:
             wavs, sr = self._model.generate_voice_clone(
                 text=text,
                 language="Japanese",
                 voice_clone_prompt=self._voice_prompt,
             )
-
             if not wavs:
-                return
-
+                return None
             audio_np = np.array(wavs[0], dtype=np.float32)
             if audio_np.ndim > 1:
                 audio_np = audio_np.flatten()
-
-            if sr != TARGET_SAMPLE_RATE:
-                audio_np = self._resample(
-                    audio_np, TARGET_SAMPLE_RATE, sr
-                ).astype(np.float32)
-
-            peak = np.max(np.abs(audio_np))
-            if peak > 0:
-                audio_np = audio_np / peak
-
-            pcm = (audio_np * self.volume_scale).astype(np.int16).tobytes()
-            if not pcm:
-                return
-            yield pcm
-
+            return [audio_np] if audio_np.size > 0 else None
         except Exception as e:
             logger.error(f"TTS合成エラー (qwen-tts): {e}", exc_info=True)
+            return None
