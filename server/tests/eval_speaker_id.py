@@ -329,6 +329,7 @@ class EvalResult:
         diff = np.array(self.diff_speaker_scores)
 
         thresholds = np.linspace(0.0, 1.0, 1000)
+        min_gap = float("inf")
         best_eer = 1.0
         best_thr = 0.5
 
@@ -337,46 +338,35 @@ class EvalResult:
             frr = np.mean(same < thr)
             # FAR: 異話者なのに閾値以上（誤受理）
             far = np.mean(diff >= thr)
-
-            if abs(frr - far) < abs(best_eer - 0.5):
-                eer_candidate = (frr + far) / 2
-                if abs(frr - far) < abs(best_eer * 2 - frr - far):
-                    best_eer = eer_candidate
-                    best_thr = thr
-
-        # より正確なEER計算
-        min_diff = float("inf")
-        for thr in thresholds:
-            frr = np.mean(same < thr)
-            far = np.mean(diff >= thr)
-            d = abs(frr - far)
-            if d < min_diff:
-                min_diff = d
+            gap = abs(frr - far)
+            if gap < min_gap:
+                min_gap = gap
                 best_eer = (frr + far) / 2
                 best_thr = float(thr)
 
         return best_eer, best_thr
 
 
-def evaluate(
+@dataclass
+class ScoreEntry:
+    """テストサンプル1件のスコア情報。"""
+    true_speaker: str
+    scores: dict[str, float]  # speaker_name -> similarity score
+
+
+def compute_scores(
     samples: dict[str, list[bytes]],
     num_enroll: int,
-    threshold: float,
-) -> EvalResult:
-    """話者識別の精度を評価する。"""
+) -> list[ScoreEntry]:
+    """全テストサンプルのスコアを計算する（閾値非依存）。"""
     import tempfile
     from ai_chatter.speaker_id import SpeakerIdentifier
 
-    result = EvalResult(
-        num_speakers=len(samples),
-        num_enroll=num_enroll,
-        threshold=threshold,
-    )
+    entries: list[ScoreEntry] = []
 
-    # 一時ファイルで SpeakerIdentifier を初期化（既存データを汚さない）
     with tempfile.TemporaryDirectory() as tmpdir:
         data_path = Path(tmpdir) / "speakers.json"
-        sid = SpeakerIdentifier(str(data_path), similarity_threshold=threshold)
+        sid = SpeakerIdentifier(str(data_path), similarity_threshold=0.0)
 
         # 登録フェーズ
         logger.info(f"登録フェーズ: 各話者 {num_enroll} サンプルを登録")
@@ -385,9 +375,8 @@ def evaluate(
                 sid.enroll(speaker_name, utterances[i])
             logger.info(f"  {speaker_name}: {min(num_enroll, len(utterances))} サンプル登録")
 
-        # テストフェーズ
+        # テストフェーズ: embedding計算とスコア算出
         speaker_names = list(samples.keys())
-        test_count = 0
 
         for true_speaker, utterances in samples.items():
             test_utterances = utterances[num_enroll:]
@@ -395,56 +384,68 @@ def evaluate(
                 logger.warning(f"  {true_speaker}: テスト用サンプルなし（全て登録に使用）")
                 continue
 
-            result.confusion.setdefault(true_speaker, {})
-
-            for i, pcm in enumerate(test_utterances):
-                test_count += 1
-
-                # embedding 計算
+            for pcm in test_utterances:
                 embedding = sid.compute_embedding(pcm)
 
-                # 全登録話者とのスコアを計算
                 scores: dict[str, float] = {}
                 for name in speaker_names:
                     centroid = np.mean(sid._speakers[name], axis=0)
                     score = sid._cosine_similarity(embedding, centroid)
                     scores[name] = score
 
-                    if name == true_speaker:
-                        result.same_speaker_scores.append(score)
-                    else:
-                        result.diff_speaker_scores.append(score)
+                entries.append(ScoreEntry(true_speaker=true_speaker, scores=scores))
 
-                # 識別結果
-                best_name = max(scores, key=scores.get)
-                best_score = scores[best_name]
+    return entries
 
-                if best_score < threshold:
-                    # 棄却（閾値未満）
-                    result.rejected += 1
-                    result.confusion[true_speaker]["__rejected__"] = \
-                        result.confusion[true_speaker].get("__rejected__", 0) + 1
-                    verdict = "棄却"
-                elif best_name == true_speaker:
-                    result.correct += 1
-                    result.confusion[true_speaker][best_name] = \
-                        result.confusion[true_speaker].get(best_name, 0) + 1
-                    verdict = "正答"
-                else:
-                    result.wrong += 1
-                    result.confusion[true_speaker][best_name] = \
-                        result.confusion[true_speaker].get(best_name, 0) + 1
-                    verdict = "誤答"
 
-                # スコア詳細
-                scores_str = ", ".join(f"{n}={s:.4f}" for n, s in sorted(scores.items()))
-                result.detail_log.append(
-                    f"  [{verdict}] 正解={true_speaker}, 判定={best_name}({best_score:.4f}) "
-                    f"| {scores_str}"
-                )
+def evaluate_from_scores(
+    score_entries: list[ScoreEntry],
+    num_speakers: int,
+    num_enroll: int,
+    threshold: float,
+) -> EvalResult:
+    """事前計算済みスコアから閾値を適用して評価結果を生成する。"""
+    result = EvalResult(
+        num_speakers=num_speakers,
+        num_enroll=num_enroll,
+        threshold=threshold,
+    )
 
-        result.num_test = test_count
+    for entry in score_entries:
+        result.confusion.setdefault(entry.true_speaker, {})
 
+        for name, score in entry.scores.items():
+            if name == entry.true_speaker:
+                result.same_speaker_scores.append(score)
+            else:
+                result.diff_speaker_scores.append(score)
+
+        best_name = max(entry.scores, key=entry.scores.get)
+        best_score = entry.scores[best_name]
+
+        if best_score < threshold:
+            result.rejected += 1
+            result.confusion[entry.true_speaker]["__rejected__"] = \
+                result.confusion[entry.true_speaker].get("__rejected__", 0) + 1
+            verdict = "棄却"
+        elif best_name == entry.true_speaker:
+            result.correct += 1
+            result.confusion[entry.true_speaker][best_name] = \
+                result.confusion[entry.true_speaker].get(best_name, 0) + 1
+            verdict = "正答"
+        else:
+            result.wrong += 1
+            result.confusion[entry.true_speaker][best_name] = \
+                result.confusion[entry.true_speaker].get(best_name, 0) + 1
+            verdict = "誤答"
+
+        scores_str = ", ".join(f"{n}={s:.4f}" for n, s in sorted(entry.scores.items()))
+        result.detail_log.append(
+            f"  [{verdict}] 正解={entry.true_speaker}, 判定={best_name}({best_score:.4f}) "
+            f"| {scores_str}"
+        )
+
+    result.num_test = len(score_entries)
     return result
 
 
@@ -474,20 +475,28 @@ def main() -> None:
     t1 = time.monotonic()
     logger.info(f"音声サンプル準備完了: {t1-t0:.1f}秒")
 
-    # 評価実行
+    # スコア計算（embedding計算は1回だけ）
     logger.info(f"評価開始（閾値={args.threshold}, 登録数={args.enroll}）...")
     t2 = time.monotonic()
-    result = evaluate(samples, num_enroll=args.enroll, threshold=args.threshold)
+    score_entries = compute_scores(samples, num_enroll=args.enroll)
     t3 = time.monotonic()
-    logger.info(f"評価完了: {t3-t2:.1f}秒")
+    logger.info(f"スコア計算完了: {t3-t2:.1f}秒")
 
+    # 指定閾値での評価レポート
+    result = evaluate_from_scores(
+        score_entries, num_speakers=len(SPEAKERS),
+        num_enroll=args.enroll, threshold=args.threshold,
+    )
     result.print_report()
 
-    # 複数閾値での比較
+    # 複数閾値での比較（スコア再利用）
     print("\n--- 閾値別精度 ---")
     print(f"{'閾値':>6}  {'正答率':>7}  {'棄却率':>7}  {'誤答率':>7}")
     for thr in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]:
-        r = evaluate(samples, num_enroll=args.enroll, threshold=thr)
+        r = evaluate_from_scores(
+            score_entries, num_speakers=len(SPEAKERS),
+            num_enroll=args.enroll, threshold=thr,
+        )
         total = max(r.num_test, 1)
         print(
             f"  {thr:.2f}  {r.correct/total*100:>6.1f}%  "
