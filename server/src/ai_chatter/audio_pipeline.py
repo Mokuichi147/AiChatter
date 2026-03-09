@@ -371,18 +371,20 @@ class AudioPipeline:
             # 次のラウンドへ（LLM再呼び出し）
             full_response = ""
 
-        if not self._interrupted and not self._ws_closed:
-            # TTS終了通知
-            header = make_header(MSG_TTS_END, self._next_seq(), 0)
-            await self._safe_send(header)
-            logger.info("TTS完了送信")
+        if not self._ws_closed:
+            if not self._interrupted:
+                # TTS終了通知
+                header = make_header(MSG_TTS_END, self._next_seq(), 0)
+                await self._safe_send(header)
+                logger.info("TTS完了送信")
 
-            # スリープ予約がある場合、TTS完了後に送信
-            # (デバイス側で再生完了を待ってからスリープに入る)
-            if self._sleep_after_tts:
-                await self._send_sleep_now()
+                # スリープ予約がある場合、TTS完了後に送信
+                # (デバイス側で再生完了を待ってからスリープに入る)
+                if self._sleep_after_tts:
+                    await self._send_sleep_now()
 
             # 会話履歴を更新（最終テキスト応答のみ記録、最大10往復=20メッセージ）
+            # 割り込み時でも認識結果と生成済み応答を記録する
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             user_entry: dict = {"role": "user", "content": user_text, "created_at": now_str}
             if is_group and speaker:
@@ -406,6 +408,14 @@ class AudioPipeline:
                 if len(self._history) > 20:
                     self._history = self._history[-20:]
                 save_history([user_entry, assistant_entry])
+            elif self._interrupted:
+                # 割り込み: LLM応答なし（ASR→LLM間で割り込まれた場合）
+                # ユーザー発言のみ記録して文脈を維持する
+                self._history.append(user_entry)
+                if len(self._history) > 20:
+                    self._history = self._history[-20:]
+                save_history([user_entry])
+                logger.info("割り込み: ユーザー発言のみ履歴に記録")
 
     async def _run_pipeline(self, audio_data: bytes) -> None:
         tts_end_sent = False
