@@ -29,6 +29,9 @@ server/data/
 server/configs/*.yaml
 !server/configs/*.example.yaml
 
+# テストキャッシュ
+server/tests/.cache/
+
 # OS
 .DS_Store
 Thumbs.db
