@@ -262,20 +262,20 @@ class VoiceCLI:
 
     async def _process_response(self, user_text: str) -> None:
         """LLMストリーミング → TTS合成 → スピーカー再生。"""
-            skill_context = ""
-            if self.skill_provider:
-                available_tools: set[str] = set()
-                if (
-                    settings.tools_enabled
-                    and self.tool_registry
-                    and not self.tool_registry.is_empty
-                ):
-                    available_tools = self.tool_registry.tool_names
-                skill_context = await self.skill_provider.retrieve(
-                    user_text,
-                    available_tools=available_tools,
-                )
-            system_prompt = self._build_system_prompt(skill_context)
+        skill_context = ""
+        if self.skill_provider:
+            available_tools: set[str] = set()
+            if (
+                settings.tools_enabled
+                and self.tool_registry
+                and not self.tool_registry.is_empty
+            ):
+                available_tools = self.tool_registry.tool_names
+            skill_context = await self.skill_provider.retrieve(
+                user_text,
+                available_tools=available_tools,
+            )
+        system_prompt = self._build_system_prompt(skill_context)
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(
