@@ -186,6 +186,13 @@ class AudioPipeline:
             self._ws_closed = True
             return False
 
+    def _available_tool_names(self) -> set[str]:
+        if not settings.tools_enabled:
+            return set()
+        if not self.tool_registry or self.tool_registry.is_empty:
+            return set()
+        return self.tool_registry.tool_names
+
     async def _synthesize_and_send(self, sentence: str) -> None:
         """テキストをTTS合成してWebSocketで送信する。
 
@@ -531,7 +538,10 @@ class AudioPipeline:
                 # --- スキル検索 + メッセージ組み立て ---
                 skill_context = ""
                 if self.skill_provider:
-                    skill_context = await self.skill_provider.retrieve(user_text)
+                    skill_context = await self.skill_provider.retrieve(
+                        user_text,
+                        available_tools=self._available_tool_names(),
+                    )
                 system_prompt = self._build_system_prompt(skill_context)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(
@@ -671,7 +681,10 @@ class AudioPipeline:
                 instruction = f"[通知] {text} — ユーザーはこの結果を待っています。内容を要約してキャラクターらしく必ず伝えてください。"
                 skill_context = ""
                 if self.skill_provider:
-                    skill_context = await self.skill_provider.retrieve(instruction)
+                    skill_context = await self.skill_provider.retrieve(
+                        instruction,
+                        available_tools=self._available_tool_names(),
+                    )
                 system_prompt = self._build_system_prompt(skill_context)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(

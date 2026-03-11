@@ -45,3 +45,7 @@ class ToolRegistry:
     @property
     def is_empty(self) -> bool:
         return len(self._tools) == 0
+
+    @property
+    def tool_names(self) -> set[str]:
+        return set(self._tools.keys())

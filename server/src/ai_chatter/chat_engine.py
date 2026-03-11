@@ -156,16 +156,18 @@ class ChatEngine:
         async with lock:
             character_id = await self._session_manager.resolve_character_id(session_id)
             tools = self._resolve_openai_tools()
-            tool_names = {
-                t.get("name", "")
-                for t in tools
-                if t.get("name")
-            }
+            tool_names: set[str] = set()
+            if (
+                self._tool_registry
+                and not self._tool_registry.is_empty
+                and settings.tools_enabled
+            ):
+                tool_names = self._tool_registry.tool_names
 
             skill_context = ""
             if self._skill_provider:
                 skill_context = await self._skill_provider.retrieve(
-                    text, available_tools=tool_names or None,
+                    text, available_tools=tool_names,
                 )
 
             system_prompt = self._build_system_prompt(character_id, skill_context)
