@@ -33,6 +33,9 @@ cd firmware
 # WiFi/サーバーIP設定
 nano main/config.h
 
+# WS_SERVER_URI は /ws?device=m5 を含める
+# 例: ws://192.168.11.52:8765/ws?device=m5
+
 idf.py set-target esp32s3
 idf.py build
 ```

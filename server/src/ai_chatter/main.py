@@ -49,7 +49,8 @@ _llm = None
 _tts = None
 _speaker_id = None
 _tool_factory: ToolFactory | None = None
-_tool_registry_ws = None
+_tool_registry_ws_default = None
+_tool_registry_ws_m5 = None
 _tool_registry_api = None
 _notification_store = None
 _memory_store = None
@@ -92,6 +93,42 @@ class ChatStreamRequest(StrictModel):
 
 def make_header(msg_type: int, seq: int, payload_len: int) -> bytes:
     return struct.pack(">BHI", msg_type, seq & 0xFFFF, payload_len)
+
+
+def _normalize_ws_param(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _is_truthy(value: str) -> bool:
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def _is_falsy(value: str) -> bool:
+    return value in {"0", "false", "no", "n", "off"}
+
+
+def _resolve_ws_capabilities(websocket: WebSocket) -> tuple[set[str], str]:
+    """WebSocket接続元のヒントから有効化するcapabilityを決定する。"""
+    query = websocket.query_params
+    device_raw = _normalize_ws_param(query.get("device") or query.get("client"))
+    m5_flag = _normalize_ws_param(query.get("m5"))
+
+    if m5_flag:
+        if _is_truthy(m5_flag):
+            return {CAP_M5_DEVICE}, f"m5:{m5_flag}"
+        if _is_falsy(m5_flag):
+            return set(), f"pc:{m5_flag}"
+
+    if device_raw:
+        if device_raw in {"m5", "m5stick", "m5sticks3", "m5s3", "esp32", "esp32s3"}:
+            return {CAP_M5_DEVICE}, device_raw
+        return set(), device_raw
+
+    user_agent = _normalize_ws_param(websocket.headers.get("user-agent"))
+    if any(token in user_agent for token in ("esp32", "m5stick", "esp-idf")):
+        return {CAP_M5_DEVICE}, f"ua:{user_agent or 'esp'}"
+
+    return set(), "auto"
 
 
 def _resolve_character_cli_values(values: list[str]) -> tuple[str, str, str]:
@@ -237,7 +274,8 @@ async def _subagent_result_scheduler() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global _asr, _llm, _tts, _speaker_id, _tool_factory, _tool_registry_ws, _tool_registry_api
+    global _asr, _llm, _tts, _speaker_id, _tool_factory
+    global _tool_registry_ws_default, _tool_registry_ws_m5, _tool_registry_api
     global _notification_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
@@ -305,7 +343,8 @@ async def startup_event() -> None:
                 get_pipelines=lambda: _active_pipelines,
                 speaker_id=_speaker_id,
             )
-            _tool_registry_ws = _tool_factory.create_registry({CAP_M5_DEVICE})
+            _tool_registry_ws_default = _tool_factory.create_registry(set())
+            _tool_registry_ws_m5 = _tool_factory.create_registry({CAP_M5_DEVICE})
             _tool_registry_api = _tool_factory.create_registry(set())
             _memory_store = _tool_factory.memory_store
             _notification_store = _tool_factory.notification_store
@@ -334,7 +373,10 @@ async def startup_event() -> None:
                 )
 
                 ToolFactory.register_subagent_tools(
-                    _tool_registry_ws, _subagent_job_manager
+                    _tool_registry_ws_default, _subagent_job_manager
+                )
+                ToolFactory.register_subagent_tools(
+                    _tool_registry_ws_m5, _subagent_job_manager
                 )
                 ToolFactory.register_subagent_tools(
                     _tool_registry_api, _subagent_job_manager
@@ -363,7 +405,8 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    global _asr, _llm, _tts, _speaker_id, _tool_factory, _tool_registry_ws, _tool_registry_api
+    global _asr, _llm, _tts, _speaker_id, _tool_factory
+    global _tool_registry_ws_default, _tool_registry_ws_m5, _tool_registry_api
     global _notification_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
@@ -399,7 +442,8 @@ async def shutdown_event() -> None:
     _notification_store = None
     _memory_store = None
     _skill_provider = None
-    _tool_registry_ws = None
+    _tool_registry_ws_default = None
+    _tool_registry_ws_m5 = None
     _tool_registry_api = None
     _tool_factory = None
     _tts = None
@@ -593,7 +637,13 @@ async def chat_stream(req: ChatStreamRequest) -> StreamingResponse:
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     client_host = websocket.client.host if websocket.client else "unknown"
-    logger.info(f"WebSocket接続: {client_host}")
+    caps, device_hint = _resolve_ws_capabilities(websocket)
+    logger.info(
+        "WebSocket接続: %s (device=%s, m5_tools=%s)",
+        client_host,
+        device_hint,
+        "on" if CAP_M5_DEVICE in caps else "off",
+    )
 
     pipeline = None
     if not ECHO_MODE and _asr and _llm and _tts:
@@ -603,8 +653,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             async def send_fn(data: bytes) -> None:
                 await websocket.send_bytes(data)
 
+            tool_registry = None
+            if settings.tools_enabled:
+                if CAP_M5_DEVICE in caps:
+                    tool_registry = _tool_registry_ws_m5
+                else:
+                    tool_registry = _tool_registry_ws_default
+
             pipeline = AudioPipeline(
-                send_fn, _asr, _llm, _tts, _tool_registry_ws, _skill_provider,
+                send_fn, _asr, _llm, _tts, tool_registry, _skill_provider,
                 speaker_id=_speaker_id,
             )
             _active_pipelines.append(pipeline)
