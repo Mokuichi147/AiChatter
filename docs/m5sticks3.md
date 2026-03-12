@@ -20,12 +20,25 @@ M5StickS3 (ESP32-S3)          PCサーバー (Python + uv)
 ## 必要なもの
 
 - M5StickS3 (ESP32-S3)
-- ESP-IDF 5.3
+- ESP-IDF 5.3.4
 
 ## ファームウェアビルド
 
 ```bash
-# ESP-IDF環境をロード
+# 1) ESP-IDF 5.3.4 を固定取得 (再現性のためタグを固定)
+# 初回のみ clone。既存がある場合は次の3行から実行。
+mkdir -p ~/esp
+git clone --branch v5.3.4 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+
+# 既存ディレクトリがある場合はタグを固定してサブモジュールを揃える
+git -C ~/esp/esp-idf fetch --tags
+git -C ~/esp/esp-idf checkout v5.3.4
+git -C ~/esp/esp-idf submodule update --init --recursive --force
+
+# 2) 必要ツールをセットアップ
+~/esp/esp-idf/install.sh esp32s3
+
+# 3) ESP-IDF環境をロード
 source ~/esp/esp-idf/export.sh
 
 cd firmware
@@ -36,8 +49,57 @@ nano main/config.h
 # WS_SERVER_URI は /ws?device=m5 を含める
 # 例: ws://192.168.11.52:8765/ws?device=m5
 
-idf.py set-target esp32s3
-idf.py build
+# 初回のみターゲット設定
+idf.py -B build set-target esp32s3
+idf.py -B build build
+
+# 書き込み
+# 先に書き込みモード(USB/UART0 DOWNLOAD)へ切り替える
+# M5StickS3 をUSB接続 → KEY1(G11) を長押しでブートモードへ
+# 接続に失敗する場合は同操作をもう一度行う
+# macOS例: /dev/cu.usbmodem1101
+# Linux例: /dev/ttyACM0
+idf.py -B build -p /dev/cu.usbmodem1101 flash
+```
+
+### 再現性チェック (任意)
+
+```bash
+# ESP-IDF がタグ v5.3.4 でクリーンな状態であることを確認
+git -C ~/esp/esp-idf describe --tags --dirty --always
+git -C ~/esp/esp-idf status -sb
+```
+
+### 起動確認 (任意)
+
+```bash
+# ポートは環境に合わせて変更
+idf.py -B build -p /dev/ttyACM0 monitor
+```
+
+モニタを終了する場合は `Ctrl+]` を押してください。
+書き込みモードのまま起動しない場合は、KEY1(G11) を離して電源ON(1回プッシュ)してください。
+
+### 電源/ブート操作
+
+- KEY1(G11) 長押し: ブートモード
+- KEY1(G11) ダブルプッシュ: 電源OFF
+- KEY1(G11) 1回プッシュ: 電源ON
+
+### サブモジュール更新エラー時の復旧 (任意)
+
+`submodule update` が `Unable to find current revision` で止まる場合の復旧手順です。
+削除せずに正しいコミットへ揃えます。
+
+```bash
+# 失敗したサブモジュールのパスを <PATH> とする
+git -C ~/esp/esp-idf ls-tree HEAD <PATH>
+
+# 出力されたコミットIDを <COMMIT> に入れてチェックアウト
+git -C ~/esp/esp-idf/<PATH> checkout <COMMIT>
+
+# その後、全サブモジュールを再同期
+git -C ~/esp/esp-idf submodule update --init --recursive --force
 ```
 
 ## WebSocketプロトコル（7バイトバイナリヘッダー）
