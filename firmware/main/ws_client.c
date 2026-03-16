@@ -415,6 +415,23 @@ void ws_client_send_interrupt(void) {
     ESP_LOGI(TAG, "バージイン割り込み送信 (seq=%u)", s_seq);
 }
 
+void ws_client_send_battery_info(uint8_t level, uint8_t charging,
+                                 uint8_t usb_powered) {
+    if (!s_client || !esp_websocket_client_is_connected(s_client)) {
+        return;
+    }
+
+    uint8_t buf[HEADER_SIZE + 3];
+    make_header(buf, 0x14, ++s_seq, 3);
+    buf[HEADER_SIZE]     = level;
+    buf[HEADER_SIZE + 1] = charging;
+    buf[HEADER_SIZE + 2] = usb_powered;
+    esp_websocket_client_send_bin(s_client, (const char *)buf, sizeof(buf),
+                                  pdMS_TO_TICKS(1000));
+    ESP_LOGI(TAG, "バッテリー情報送信: level=%u%% charging=%u usb=%u (seq=%u)",
+             level, charging, usb_powered, s_seq);
+}
+
 bool ws_client_is_connected(void) {
     return s_client != NULL && esp_websocket_client_is_connected(s_client);
 }

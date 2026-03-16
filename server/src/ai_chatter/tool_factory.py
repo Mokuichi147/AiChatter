@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
+from ai_chatter.battery import BatteryStore
 from ai_chatter.config import character_data_path, llm_config, prompt_config, settings
+from ai_chatter.tools.battery import GetBatteryTool
 from ai_chatter.skills import SkillProvider
 from ai_chatter.tools import ToolRegistry
 from ai_chatter.tools.conversation_memory import DeleteMemoryTool, MemoryStore, SaveMemoryTool, SearchMemoryTool
@@ -45,6 +47,7 @@ class ToolFactory:
             rerank_api_key=rerank.api_key or llm_config.api_key,
             rerank_top_n=rerank.top_n,
         )
+        self.battery_store = BatteryStore()
         self.notification_store = NotificationStore(settings.notification_file)
         self.skill_provider = SkillProvider(
             memory_store=self.memory_store,
@@ -64,6 +67,7 @@ class ToolFactory:
         registry.register(SetNotificationTool(self.notification_store))
         registry.register(ListNotificationsTool(self.notification_store))
         registry.register(DeleteNotificationTool(self.notification_store))
+        registry.register(GetBatteryTool(self.battery_store))
 
         if self.tts is not None:
             from ai_chatter.tools.voice_control import SetVolumeTool

@@ -5,6 +5,7 @@ idf_component_register(
         "lcd_display.c"
         "audio_hal.c"
         "state_machine.c"
+        "battery_monitor.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -17,7 +18,6 @@ idf_component_register(
         esp_timer
         freertos
         esp_websocket_client
-        esp_codec_dev
         spi_flash
         log
 )

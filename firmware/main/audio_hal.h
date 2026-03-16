@@ -71,3 +71,13 @@ void audio_hal_sleep(void);
  * @brief ウェイク: AW8737(アンプ)ON + マイクタスク再開
  */
 void audio_hal_wake(void);
+
+/**
+ * @brief PMIC (M5PM1) レジスタ読み取り
+ *
+ * @param reg   レジスタアドレス
+ * @param out   読み取りデータ格納先
+ * @param len   読み取りバイト数
+ * @return 0=成功, 非0=失敗
+ */
+int pmic_read_reg(uint8_t reg, uint8_t *out, size_t len);

@@ -48,6 +48,15 @@ void ws_client_send_interrupt(void);
 void ws_client_send_button(void);
 
 /**
+ * @brief バッテリー情報をサーバーへ送信 (type=0x14)
+ * @param level       バッテリー残量 (0-100)
+ * @param charging    充電中フラグ (0 or 1)
+ * @param usb_powered USB給電フラグ (0 or 1)
+ */
+void ws_client_send_battery_info(uint8_t level, uint8_t charging,
+                                 uint8_t usb_powered);
+
+/**
  * @brief WebSocket接続状態を返す
  */
 bool ws_client_is_connected(void);

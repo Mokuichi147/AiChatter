@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from ai_chatter.battery import BatteryInfo
 from ai_chatter.character_catalog import CharacterCatalog
 from ai_chatter.chat_engine import ChatEngine
 from ai_chatter.config import settings
@@ -31,6 +32,7 @@ MSG_AUDIO_CHUNK = 0x01
 MSG_EOS = 0x11
 MSG_INTERRUPT = 0x12
 MSG_BUTTON = 0x13
+MSG_BATTERY_INFO = 0x14
 
 # WebSocketメッセージタイプ (Server → ESP32)
 MSG_TTS_CHUNK = 0x02
@@ -53,6 +55,7 @@ _tool_registry_ws_default = None
 _tool_registry_ws_m5 = None
 _tool_registry_api = None
 _notification_store = None
+_battery_store = None
 _memory_store = None
 _skill_provider = None
 _subagent_job_manager = None
@@ -272,11 +275,80 @@ async def _subagent_result_scheduler() -> None:
             await _subagent_job_manager.requeue_completed_messages(undelivered)
 
 
+async def _battery_monitor_scheduler() -> None:
+    """バッテリー状態を定期チェックし、閾値・状態変化時に通知ストア経由で通知する。"""
+    from datetime import datetime
+
+    from ai_chatter.battery import battery_to_human_message, get_pc_battery
+
+    interval = settings.battery_check_interval
+    threshold = settings.battery_low_threshold
+
+    # 直前の通知状態を記憶して重複通知を防止
+    last_notified: dict[str, str] = {}  # source -> last event
+
+    while True:
+        await asyncio.sleep(interval)
+        if _battery_store is None:
+            continue
+
+        # PCバッテリー取得 → BatteryStore更新
+        pc_battery = get_pc_battery()
+        if pc_battery is not None:
+            await _battery_store.update("pc", pc_battery.level, pc_battery.is_charging)
+
+        if _notification_store is None:
+            continue
+
+        all_batteries = await _battery_store.get_all()
+        for source, info in all_batteries.items():
+            event = _detect_battery_event(info, last_notified.get(source), threshold)
+            if event is None:
+                continue
+
+            last_notified[source] = event
+            message = battery_to_human_message(info, event)
+            if not message:
+                continue
+
+            logger.info(
+                "バッテリー通知: source=%s event=%s level=%d charging=%s",
+                source, event, info.level, info.is_charging,
+            )
+            _notification_store.add(datetime.now(), message)
+
+
+def _detect_battery_event(
+    info: BatteryInfo,
+    last_event: str | None,
+    threshold: int,
+) -> str | None:
+    """バッテリー状態から通知イベントを判定する。同一イベントは重複しない。"""
+    # 満充電
+    if info.is_charging and info.level >= 100:
+        return "full" if last_event != "full" else None
+
+    # 充電開始
+    if info.is_charging and last_event not in ("charging_start", "full"):
+        return "charging_start"
+
+    # 充電解除
+    if not info.is_charging and last_event in ("charging_start", "full"):
+        return "charging_stop"
+
+    # 低バッテリー (非充電中のみ)
+    if not info.is_charging and info.level <= threshold:
+        if last_event != "low":
+            return "low"
+
+    return None
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     global _asr, _llm, _tts, _speaker_id, _tool_factory
     global _tool_registry_ws_default, _tool_registry_ws_m5, _tool_registry_api
-    global _notification_store, _memory_store, _skill_provider
+    global _notification_store, _battery_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
     # キャラクターカタログ初期化（REST/CLI共通）
@@ -348,6 +420,7 @@ async def startup_event() -> None:
             _tool_registry_api = _tool_factory.create_registry(set())
             _memory_store = _tool_factory.memory_store
             _notification_store = _tool_factory.notification_store
+            _battery_store = _tool_factory.battery_store
             _skill_provider = _tool_factory.skill_provider
 
             if settings.subagent_enabled:
@@ -400,6 +473,9 @@ async def startup_event() -> None:
             asyncio.create_task(
                 _subagent_result_scheduler(), name="subagent_result_scheduler"
             ),
+            asyncio.create_task(
+                _battery_monitor_scheduler(), name="battery_monitor_scheduler"
+            ),
         ]
 
 
@@ -407,7 +483,7 @@ async def startup_event() -> None:
 async def shutdown_event() -> None:
     global _asr, _llm, _tts, _speaker_id, _tool_factory
     global _tool_registry_ws_default, _tool_registry_ws_m5, _tool_registry_api
-    global _notification_store, _memory_store, _skill_provider
+    global _notification_store, _battery_store, _memory_store, _skill_provider
     global _subagent_job_manager, _scheduler_tasks, _character_catalog, _session_manager, _chat_engine
 
     logger.info("シャットダウン処理開始")
@@ -440,6 +516,7 @@ async def shutdown_event() -> None:
     _subagent_job_manager = None
     _speaker_id = None
     _notification_store = None
+    _battery_store = None
     _memory_store = None
     _skill_provider = None
     _tool_registry_ws_default = None
@@ -686,6 +763,19 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             msg_type, seq, payload_len = struct.unpack(">BHI", data[:HEADER_SIZE])
             payload = data[HEADER_SIZE : HEADER_SIZE + payload_len]
+
+            # バッテリー情報はパイプラインモードに関係なく処理
+            if msg_type == MSG_BATTERY_INFO and _battery_store is not None:
+                if len(payload) >= 3:
+                    level = payload[0]
+                    is_charging = payload[1] != 0
+                    # payload[2] = is_usb_powered (ログ用)
+                    logger.info(
+                        "M5バッテリー受信: level=%d%% charging=%s usb=%s",
+                        level, is_charging, payload[2] != 0,
+                    )
+                    await _battery_store.update("m5", level, is_charging)
+                continue
 
             if pipeline:
                 # AIパイプラインモード
