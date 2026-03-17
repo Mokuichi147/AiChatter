@@ -286,6 +286,7 @@ async def _battery_monitor_scheduler() -> None:
 
     # 直前の通知状態を記憶して重複通知を防止
     last_notified: dict[str, str] = {}  # source -> last event
+    initialized_sources: set[str] = set()  # 初回は通知せず状態を記録するだけ
 
     while True:
         await asyncio.sleep(interval)
@@ -302,6 +303,18 @@ async def _battery_monitor_scheduler() -> None:
 
         all_batteries = await _battery_store.get_all()
         for source, info in all_batteries.items():
+            # 初回チェック時は通知せず現在の状態を記録するだけ
+            if source not in initialized_sources:
+                initialized_sources.add(source)
+                event = _detect_battery_event(info, None, threshold)
+                if event is not None:
+                    last_notified[source] = event
+                    logger.info(
+                        "バッテリー初期状態記録: source=%s event=%s level=%d charging=%s",
+                        source, event, info.level, info.is_charging,
+                    )
+                continue
+
             event = _detect_battery_event(info, last_notified.get(source), threshold)
             if event is None:
                 continue
