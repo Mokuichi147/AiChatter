@@ -333,6 +333,10 @@ class Settings(BaseSettings):
     conversation_mode: str = "solo"  # "solo" or "group"
     speaker_similarity_threshold: float = 0.65
 
+    # バッテリー監視
+    battery_low_threshold: int = 20  # 低バッテリー通知閾値 (%)
+    battery_check_interval: int = 60  # チェック間隔 (秒)
+
     # サーバー設定
     host: str = "0.0.0.0"
     port: int = 8765

@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "audio_hal.h"
+#include "battery_monitor.h"
 #include "config.h"
 #include "driver/gpio.h"
 #include "esp_event.h"
@@ -282,6 +283,9 @@ void app_main(void) {
 
     /* WebSocketクライアント初期化 */
     ws_client_init(WS_SERVER_URI, tts_audio_callback, tts_end_callback);
+
+    /* バッテリー監視タスク起動 */
+    battery_monitor_init();
 
     /* ボタンタスク起動 */
     xTaskCreatePinnedToCore(button_task, "button", 4096, NULL, 3, NULL, 0);
