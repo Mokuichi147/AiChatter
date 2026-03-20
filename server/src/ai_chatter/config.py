@@ -315,8 +315,7 @@ class Settings(BaseSettings):
     tools_enabled: bool = True
     memory_file: str = "data/memory.json"
     tavily_api_key: str = ""
-    google_cse_api_key: str = ""
-    google_cse_cx: str = ""
+    exa_api_key: str = ""
     brave_search_api_key: str = ""
     subagent_num_ctx: int = 128000
     subagent_enabled: bool = True

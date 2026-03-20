@@ -15,13 +15,13 @@ logger = logging.getLogger(__name__)
 # --- エンジン定義 ---
 
 TAVILY_URL = "https://api.tavily.com/search"
-GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1"
+EXA_URL = "https://api.exa.ai/search"
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 
 # 無料枠 (period_type, limit)
 FREE_TIERS: dict[str, tuple[str, int]] = {
     "tavily": ("monthly", 1000),
-    "google": ("daily", 100),
+    "exa": ("monthly", 1000),
     "brave": ("monthly", 2000),
 }
 
@@ -129,24 +129,32 @@ async def _search_tavily(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 
-async def _search_google(query: str, max_results: int = 5) -> list[dict]:
-    params = {
-        "key": settings.google_cse_api_key,
-        "cx": settings.google_cse_cx,
-        "q": query,
-        "num": min(max_results, 10),
+async def _search_exa(query: str, max_results: int = 5) -> list[dict]:
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": settings.exa_api_key,
     }
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(GOOGLE_CSE_URL, params=params)
+        resp = await client.post(
+            EXA_URL,
+            headers=headers,
+            json={
+                "query": query,
+                "numResults": max_results,
+                "contents": {"highlights": True},
+            },
+        )
         resp.raise_for_status()
         data = resp.json()
 
     results = []
-    for item in data.get("items", []):
+    for r in data.get("results", []):
+        highlights = r.get("highlights", [])
+        snippet = highlights[0] if highlights else ""
         results.append({
-            "title": item.get("title", ""),
-            "snippet": item.get("snippet", ""),
-            "url": item.get("link", ""),
+            "title": r.get("title", ""),
+            "snippet": snippet,
+            "url": r.get("url", ""),
         })
     return results
 
@@ -178,10 +186,7 @@ async def _search_brave(query: str, max_results: int = 5) -> list[dict]:
 # エンジン名 → (APIキー存在チェック関数, 検索関数)
 _ENGINE_REGISTRY: dict[str, tuple] = {
     "tavily": (lambda: bool(settings.tavily_api_key), _search_tavily),
-    "google": (
-        lambda: bool(settings.google_cse_api_key and settings.google_cse_cx),
-        _search_google,
-    ),
+    "exa": (lambda: bool(settings.exa_api_key), _search_exa),
     "brave": (lambda: bool(settings.brave_search_api_key), _search_brave),
 }
 
@@ -237,7 +242,7 @@ class SearchTool(ToolBase):
 
         if not engines:
             return ToolResult(
-                content="検索APIキーが設定されていません。TAVILY_API_KEY, GOOGLE_CSE_API_KEY, BRAVE_SEARCH_API_KEY のいずれかを設定してください。",
+                content="検索APIキーが設定されていません。TAVILY_API_KEY, EXA_API_KEY, BRAVE_SEARCH_API_KEY のいずれかを設定してください。",
                 is_error=True,
             )
 
