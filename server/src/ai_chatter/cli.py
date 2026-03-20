@@ -14,7 +14,7 @@ from ai_chatter.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
 
-app = typer.Typer(help="AiChatter CLI", invoke_without_command=True, context_settings={"help_option_names": ["-h", "--help"]})
+app = typer.Typer(help="AiChatter CLI", invoke_without_command=True, add_completion=False, context_settings={"help_option_names": ["-h", "--help"]})
 
 # 共通オプション型
 OptCharacter = Annotated[str, typer.Option("-c", "--character", help="キャラクター設定ファイル")]
