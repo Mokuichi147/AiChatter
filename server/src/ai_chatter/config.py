@@ -9,6 +9,33 @@ from ai_chatter._paths import SERVER_ROOT
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_config_path(base_path: str) -> str:
+    """設定ファイルのパスを優先順位に従って解決する。
+
+    優先順位: 指定ファイル(base_path) > exampleなしファイル > exampleありファイル
+    base_path が存在すればそのまま返し、なければ .example.yaml を試す。
+    """
+    path = Path(base_path)
+    if not path.is_absolute():
+        path = SERVER_ROOT / path
+
+    if path.exists():
+        return base_path
+
+    # example版を試す (例: configs/model.yaml → configs/model.example.yaml)
+    example_path = path.with_suffix("").with_suffix(".example.yaml")
+    if example_path.exists():
+        try:
+            rel = str(example_path.relative_to(SERVER_ROOT))
+        except ValueError:
+            rel = str(example_path)
+        logger.info(f"設定ファイル {base_path} が見つからないため {rel} を使用します")
+        return rel
+
+    return base_path
+
+
 # デフォルトモデル (macOS / mlx-audio)
 DEFAULT_TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
 DEFAULT_VOICE_DESIGN_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
@@ -311,6 +338,9 @@ class Settings(BaseSettings):
     # プロンプト設定ファイル
     prompt_file: str = "configs/prompt.yaml"
 
+    # モデル設定ファイル
+    model_file: str = "configs/model.yaml"
+
     # ツール設定
     tools_enabled: bool = True
     memory_file: str = "data/memory.json"
@@ -352,9 +382,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+settings.character_file = _resolve_config_path(settings.character_file)
+settings.prompt_file = _resolve_config_path(settings.prompt_file)
+settings.model_file = _resolve_config_path(settings.model_file)
+
 character = load_character(settings.character_file)
 prompt_config = load_prompt(settings.prompt_file)
-_model_config = load_model("configs/model.yaml")
+_model_config = load_model(settings.model_file)
 
 # 後方互換エイリアス
 llm_config = _model_config.llm

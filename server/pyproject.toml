@@ -27,6 +27,7 @@ dependencies = [
     "torch>=2.0.0",
     "sounddevice>=0.4.6",
     "prompt_toolkit>=3.0.0",
+    "typer>=0.24.1",
 ]
 
 [project.scripts]

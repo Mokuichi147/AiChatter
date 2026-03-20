@@ -1,13 +1,11 @@
-from __future__ import annotations
-
-import argparse
 import asyncio
-import glob
 import logging
 import signal
-import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
+
+import typer
 
 from ai_chatter.character_catalog import CharacterCatalog
 from ai_chatter.config import settings
@@ -16,6 +14,19 @@ from ai_chatter.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
 
+app = typer.Typer(help="AiChatter CLI", invoke_without_command=True, context_settings={"help_option_names": ["-h", "--help"]})
+
+# 共通オプション型
+OptCharacter = Annotated[str, typer.Option("-c", "--character", help="キャラクター設定ファイル")]
+OptModel = Annotated[str, typer.Option("-m", "--model", help="モデル設定ファイル")]
+OptPrompt = Annotated[str, typer.Option("-p", "--prompt", help="プロンプト設定ファイル")]
+
+
+@app.callback()
+def _app_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        print(ctx.get_help())
+        raise typer.Exit()
 
 
 def _build_tools():
@@ -23,113 +34,58 @@ def _build_tools():
     return factory.create_registry(set()), factory.skill_provider
 
 
-def _apply_server_character_selection(values: list[str] | None) -> None:
-    """server起動時の-c/--character引数を解釈して設定へ反映する。"""
-    if not values:
-        return
-
-    from ai_chatter import config as _config
-    from ai_chatter.config import load_character
-
-    expanded: list[str] = []
-    original_patterns: list[str] = []
-
-    for raw in values:
-        token = (raw or "").strip()
-        if not token:
-            continue
-
-        if any(ch in token for ch in "*?[]"):
-            original_patterns.append(token)
-            matched = sorted(glob.glob(token))
-            if matched:
-                expanded.extend(matched)
-            continue
-
-        expanded.append(token)
-
-    # サンプル定義はデフォルト候補から除外
-    expanded = [p for p in expanded if not str(p).endswith(".example.yaml")]
-
-    if not expanded:
-        raise ValueError(f"character指定に一致するファイルがありません: {values}")
-
-    # 先頭をデフォルトキャラクターとして採用
-    default_path = Path(expanded[0]).expanduser()
-    if not default_path.is_absolute():
-        default_path = Path.cwd() / default_path
-    if not default_path.exists() or not default_path.is_file():
-        raise ValueError(f"デフォルトキャラクターファイルが見つかりません: {default_path}")
-
-    default_str = str(default_path)
-    settings.character_file = default_str
-    _config.character = load_character(default_str)
-
-    # ワイルドカード指定なら、カタログ探索条件も更新する
-    if original_patterns:
-        pat = original_patterns[0]
-        p = Path(pat).expanduser()
-        if p.is_absolute():
-            settings.character_dir = str(p.parent)
-            settings.character_glob = p.name
-        else:
-            # 相対パターンは現在ディレクトリ基準で絶対化
-            abs_pat = (Path.cwd() / p).resolve()
-            settings.character_dir = str(abs_pat.parent)
-            settings.character_glob = abs_pat.name
+def _setup_logging(*, debug: bool = False, server: bool = False) -> None:
+    if server:
+        log_level = logging.INFO
+    elif debug:
+        log_level = logging.DEBUG
     else:
-        # 明示ファイル指定のみの場合は、デフォルトファイルのディレクトリを探索対象に含める
-        settings.character_dir = str(default_path.parent)
-        settings.character_glob = "character*.yaml"
-
-    logger.info(
-        "server起動キャラクター設定: default=%s, dir=%s, glob=%s",
-        settings.character_file,
-        settings.character_dir,
-        settings.character_glob,
+        log_level = logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
 
-async def _run_voice(args: argparse.Namespace) -> None:
-    from ai_chatter.local_asr import LocalASR
-    from ai_chatter.local_llm import LocalLLM
-    from ai_chatter.local_tts import LocalTTS
-    from ai_chatter.voice_cli import VoiceCLI
-
-    _apply_server_character_selection(args.character)
-
-    if args.group:
-        settings.conversation_mode = "group"
-
-    logger.info("AIモデルをプリロード中...")
-    asr = LocalASR()
-    llm = LocalLLM()
-    tts = LocalTTS()
-    logger.info("AIモデルプリロード完了")
-
-    speaker_id = None
-    if settings.conversation_mode == "group":
-        from ai_chatter.config import character_data_path
-        from ai_chatter.speaker_id import SpeakerIdentifier
-
-        speakers_path = character_data_path("speakers.json")
-        speaker_id = SpeakerIdentifier(
-            speakers_path,
-            similarity_threshold=settings.speaker_similarity_threshold,
-        )
-        logger.info("話者識別モジュール初期化完了 (グループモード)")
-
-    tool_registry, skill_provider = _build_tools()
-
-    voice = VoiceCLI(
-        asr=asr,
-        llm=llm,
-        tts=tts,
-        tool_registry=tool_registry,
-        skill_provider=skill_provider,
-        speaker_id=speaker_id,
+def _apply_cli_overrides(character: str, model: str, prompt: str) -> None:
+    """-c / -m / -p の値を解釈して設定を再読み込みする。"""
+    from ai_chatter import config as _config
+    from ai_chatter.config import (
+        _resolve_config_path,
+        load_character,
+        load_model,
+        load_prompt,
     )
-    await voice.run()
+
+    def _resolve(file_path: str) -> str:
+        """cwd基準で絶対パスに変換し、example fallbackを適用する。"""
+        p = Path(file_path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        return _resolve_config_path(str(p))
+
+    # -- character --
+    resolved = _resolve(character)
+    settings.character_file = resolved
+    settings.character_dir = str(Path(resolved).parent)
+    _config.character = load_character(resolved)
+    logger.info("キャラクター設定: %s", resolved)
+
+    # -- model --
+    resolved = _resolve(model)
+    settings.model_file = resolved
+    mc = load_model(resolved)
+    _config._model_config = mc
+    _config.llm_config = mc.llm
+    _config.tts_config = mc.tts
+    _config.asr_config = mc.asr
+    logger.info("モデル設定: %s", resolved)
+
+    # -- prompt --
+    resolved = _resolve(prompt)
+    settings.prompt_file = resolved
+    _config.prompt_config = load_prompt(resolved)
+    logger.info("プロンプト設定: %s", resolved)
 
 
 def _play_tts(tts, text: str) -> None:
@@ -147,11 +103,31 @@ def _play_tts(tts, text: str) -> None:
         sd.wait()
 
 
-async def _run_chat(args: argparse.Namespace) -> None:
+@app.command()
+def chat(
+    character: OptCharacter = "configs/character.yaml",
+    model: OptModel = "configs/model.yaml",
+    prompt: OptPrompt = "configs/prompt.yaml",
+    history_mode: Annotated[str, typer.Option("--history-mode", help="会話履歴モード")] = settings.default_history_mode,
+    session_id: Annotated[str, typer.Option("--session-id", help="セッションID")] = "cli",
+    stream: Annotated[bool, typer.Option("--stream", help="ストリーミング表示")] = False,
+    voice: Annotated[bool, typer.Option("--voice", help="返答をTTS音声で再生")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="デバッグログを表示")] = False,
+) -> None:
+    """対話CLIモード"""
+    _setup_logging(debug=debug)
+    _apply_cli_overrides(character, model, prompt)
+    asyncio.run(_run_chat_async(history_mode, session_id, stream, voice))
+
+
+async def _run_chat_async(
+    history_mode: str,
+    session_id: str,
+    stream: bool,
+    use_voice: bool,
+) -> None:
     from ai_chatter.chat_engine import ChatEngine
     from ai_chatter.local_llm import LocalLLM
-
-    _apply_server_character_selection(args.character)
 
     catalog = CharacterCatalog(settings.character_dir, settings.character_glob)
     catalog.reload()
@@ -160,14 +136,14 @@ async def _run_chat(args: argparse.Namespace) -> None:
         catalog.register_file(settings.character_file)
     character_id = default_name
 
-    history_mode = (args.history_mode or settings.default_history_mode).strip().lower()
+    history_mode = (history_mode or settings.default_history_mode).strip().lower()
     if history_mode not in ALLOWED_HISTORY_MODES:
-        raise ValueError(
+        raise typer.BadParameter(
             f"history-mode は {sorted(ALLOWED_HISTORY_MODES)} のいずれかを指定してください"
         )
 
     tts = None
-    if args.voice:
+    if use_voice:
         from ai_chatter.local_tts import LocalTTS
 
         tts = LocalTTS()
@@ -187,7 +163,6 @@ async def _run_chat(args: argparse.Namespace) -> None:
         skill_provider=skill_provider,
     )
 
-    session_id = args.session_id or "cli"
     await engine.ensure_session(
         session_id=session_id,
         history_mode=history_mode,
@@ -200,8 +175,6 @@ async def _run_chat(args: argparse.Namespace) -> None:
     print(f"\nCLI会話を開始します。session_id={session_id}, character={chosen_name} ({character_id})")
     print("終了するには 'exit' または 'quit' を入力してください。\n")
 
-    # asyncio の SIGINT ハンドラを無効化し、input() が Ctrl+C で
-    # 即座に KeyboardInterrupt を受け取れるようにする
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     from prompt_toolkit import PromptSession
@@ -220,7 +193,7 @@ async def _run_chat(args: argparse.Namespace) -> None:
             if user_text.lower() in {"exit", "quit"}:
                 break
 
-            if args.stream:
+            if stream:
                 print(f"{chosen_name}> ", end="", flush=True)
                 full_response = ""
                 async for event in engine.stream_chat(session_id=session_id, text=user_text):
@@ -252,13 +225,75 @@ async def _run_chat(args: argparse.Namespace) -> None:
         print()
 
 
-def _run_server(args: argparse.Namespace) -> None:
-    _apply_server_character_selection(args.character)
+@app.command()
+def voice(
+    character: OptCharacter = "configs/character.yaml",
+    model: OptModel = "configs/model.yaml",
+    prompt: OptPrompt = "configs/prompt.yaml",
+    group: Annotated[bool, typer.Option("--group", help="グループモードで起動する")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="デバッグログを表示")] = False,
+) -> None:
+    """音声対話CLIモード (PCマイク/スピーカー)"""
+    _setup_logging(debug=debug)
+    _apply_cli_overrides(character, model, prompt)
+    asyncio.run(_run_voice_async(group))
 
-    if args.group:
+
+async def _run_voice_async(group: bool) -> None:
+    from ai_chatter.local_asr import LocalASR
+    from ai_chatter.local_llm import LocalLLM
+    from ai_chatter.local_tts import LocalTTS
+    from ai_chatter.voice_cli import VoiceCLI
+
+    if group:
         settings.conversation_mode = "group"
 
-    from ai_chatter.main import ECHO_MODE, app
+    logger.info("AIモデルをプリロード中...")
+    asr = LocalASR()
+    llm = LocalLLM()
+    tts = LocalTTS()
+    logger.info("AIモデルプリロード完了")
+
+    speaker_id = None
+    if settings.conversation_mode == "group":
+        from ai_chatter.config import character_data_path
+        from ai_chatter.speaker_id import SpeakerIdentifier
+
+        speakers_path = character_data_path("speakers.json")
+        speaker_id = SpeakerIdentifier(
+            speakers_path,
+            similarity_threshold=settings.speaker_similarity_threshold,
+        )
+        logger.info("話者識別モジュール初期化完了 (グループモード)")
+
+    tool_registry, skill_provider = _build_tools()
+
+    voice_cli = VoiceCLI(
+        asr=asr,
+        llm=llm,
+        tts=tts,
+        tool_registry=tool_registry,
+        skill_provider=skill_provider,
+        speaker_id=speaker_id,
+    )
+    await voice_cli.run()
+
+
+@app.command()
+def server(
+    character: OptCharacter = "configs/character.yaml",
+    model: OptModel = "configs/model.yaml",
+    prompt: OptPrompt = "configs/prompt.yaml",
+    group: Annotated[bool, typer.Option("--group", help="グループモードで起動する")] = False,
+) -> None:
+    """サーバー起動モード"""
+    _setup_logging(server=True)
+    _apply_cli_overrides(character, model, prompt)
+
+    if group:
+        settings.conversation_mode = "group"
+
+    from ai_chatter.main import ECHO_MODE, app as fastapi_app
     import uvicorn
 
     mode = "エコー" if ECHO_MODE else "AI"
@@ -268,7 +303,7 @@ def _run_server(args: argparse.Namespace) -> None:
         logger.info(f"LLMモデル: {llm_config.model}")
 
     uvicorn.run(
-        app,
+        fastapi_app,
         host=settings.host,
         port=settings.port,
         log_level="info",
@@ -278,90 +313,7 @@ def _run_server(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="AiChatter CLI")
-    subparsers = parser.add_subparsers(dest="command")
-
-    chat_parser = subparsers.add_parser("chat", help="対話CLIモード")
-    chat_parser.add_argument(
-        "-c",
-        "--character",
-        nargs="+",
-        help=(
-            "デフォルトキャラクターファイルまたはglobパターン。"
-            "例: -c character.yaml / -c 'character*.yaml'"
-        ),
-    )
-    chat_parser.add_argument(
-        "--history-mode",
-        default=settings.default_history_mode,
-        help=f"会話履歴モード ({'/'.join(sorted(ALLOWED_HISTORY_MODES))})",
-    )
-    chat_parser.add_argument("--session-id", default="cli")
-    chat_parser.add_argument("--stream", action="store_true", help="ストリーミング表示")
-    chat_parser.add_argument("--voice", action="store_true", help="返答をTTS音声で再生")
-    chat_parser.add_argument("--debug", action="store_true", help="デバッグログを表示")
-
-    voice_parser = subparsers.add_parser("voice", help="音声対話CLIモード (PCマイク/スピーカー)")
-    voice_parser.add_argument(
-        "-c",
-        "--character",
-        nargs="+",
-        help=(
-            "デフォルトキャラクターファイルまたはglobパターン。"
-            "例: -c character.yaml / -c 'character*.yaml'"
-        ),
-    )
-    voice_parser.add_argument(
-        "--group",
-        action="store_true",
-        help="グループモードで起動する（複数人会話・話者識別を有効化）",
-    )
-    voice_parser.add_argument("--debug", action="store_true", help="デバッグログを表示")
-
-    server_parser = subparsers.add_parser("server", help="サーバー起動モード")
-    server_parser.add_argument(
-        "-c",
-        "--character",
-        nargs="+",
-        help=(
-            "デフォルトキャラクターファイルまたはglobパターン。"
-            "例: -c character.yaml / -c 'character*.yaml'"
-        ),
-    )
-    server_parser.add_argument(
-        "--group",
-        action="store_true",
-        help="グループモードで起動する（複数人会話・話者識別を有効化）",
-    )
-
-    # 互換性: サブコマンド未指定時は chat 扱い
-    if len(sys.argv) > 1 and sys.argv[1] in {"chat", "voice", "server", "-h", "--help"}:
-        ns = parser.parse_args()
-    else:
-        ns = chat_parser.parse_args(sys.argv[1:])
-        ns.command = "chat"
-
-    # chat/voice は --debug 指定時のみログ表示、server は常に表示
-    if ns.command == "server":
-        log_level = logging.INFO
-    elif getattr(ns, "debug", False):
-        log_level = logging.DEBUG
-    else:
-        log_level = logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-    try:
-        if ns.command == "server":
-            _run_server(ns)
-        elif ns.command == "voice":
-            asyncio.run(_run_voice(ns))
-        else:
-            asyncio.run(_run_chat(ns))
-    except KeyboardInterrupt:
-        pass
+    app()
 
 
 if __name__ == "__main__":
