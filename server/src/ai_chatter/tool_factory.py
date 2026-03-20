@@ -4,11 +4,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 from ai_chatter.battery import BatteryStore
-from ai_chatter.config import character_data_path, llm_config, prompt_config, settings
+from ai_chatter.config import character, character_data_path, llm_config, prompt_config, settings
 from ai_chatter.tools.battery import GetBatteryTool
 from ai_chatter.skills import SkillProvider
 from ai_chatter.tools import ToolRegistry
 from ai_chatter.tools.conversation_memory import DeleteMemoryTool, MemoryStore, SaveMemoryTool, SearchMemoryTool
+from ai_chatter.tools.goal_management import (
+    AddGoalTool,
+    CompleteGoalTool,
+    DeleteGoalTool,
+    GoalStore,
+    ListGoalsTool,
+    UpdateGoalTool,
+)
 from ai_chatter.tools.display_control import DisplayImageTool, DisplayTextTool
 from ai_chatter.tools.notification import DeleteNotificationTool, ListNotificationsTool, NotificationStore, SetNotificationTool
 from ai_chatter.tools.search import SearchTool
@@ -49,6 +57,10 @@ class ToolFactory:
         )
         self.battery_store = BatteryStore()
         self.notification_store = NotificationStore(settings.notification_file)
+        self.goal_store = GoalStore(
+            character_data_path("goals.json"),
+            seed_goals=character.persona.goals or None,
+        )
         self.skill_provider = SkillProvider(
             memory_store=self.memory_store,
             skills_config=prompt_config.skills,
@@ -68,6 +80,12 @@ class ToolFactory:
         registry.register(ListNotificationsTool(self.notification_store))
         registry.register(DeleteNotificationTool(self.notification_store))
         registry.register(GetBatteryTool(self.battery_store))
+
+        registry.register(AddGoalTool(self.goal_store))
+        registry.register(UpdateGoalTool(self.goal_store))
+        registry.register(ListGoalsTool(self.goal_store))
+        registry.register(CompleteGoalTool(self.goal_store))
+        registry.register(DeleteGoalTool(self.goal_store))
 
         if self.tts is not None:
             from ai_chatter.tools.voice_control import SetVolumeTool

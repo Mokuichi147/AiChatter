@@ -310,6 +310,7 @@ class AudioPipeline:
         user_text: str,
         speaker: str | None = None,
         speaker_embedding: list[float] | None = None,
+        skip_prefix: str | None = None,
     ) -> None:
         """LLMストリーミング → TTS合成 → 送信 → 履歴更新。"""
         # ツール設定
@@ -323,6 +324,10 @@ class AudioPipeline:
 
         is_group = settings.conversation_mode == "group"
 
+        # SKIP判定用プレフィックス (グループモード or 自律行動)
+        check_skip_prefix = skip_prefix or ("[SKIP]" if is_group else None)
+        check_skip_len = len(check_skip_prefix) if check_skip_prefix else 0
+
         # --- LLM + TTS ストリーミング (ツール実行ループ) ---
         full_response = ""
         skipped = False
@@ -330,7 +335,7 @@ class AudioPipeline:
         for round_num in range(MAX_TOOL_ROUNDS):
             tool_call_requests: list[ToolCallRequest] = []
 
-            # グループモード: SKIP判定用バッファ
+            # SKIP判定用バッファ
             skip_buffer = ""
             skip_checked = False
 
@@ -340,14 +345,14 @@ class AudioPipeline:
                     break
 
                 if isinstance(event, TextChunk):
-                    if is_group and not skip_checked:
+                    if check_skip_prefix and not skip_checked:
                         # 最初の出力をバッファリングしてSKIP判定
                         skip_buffer += event.text
-                        if len(skip_buffer) >= 6:
+                        if len(skip_buffer) >= check_skip_len:
                             skip_checked = True
-                            if skip_buffer.strip().startswith("[SKIP]"):
+                            if skip_buffer.strip().startswith(check_skip_prefix):
                                 skipped = True
-                                logger.info("グループモード: SKIP判定 → TTS合成スキップ")
+                                logger.info(f"SKIP判定 ({check_skip_prefix}) → TTS合成スキップ")
                                 break
                             else:
                                 # バッファ内容をTTSに流す
@@ -362,12 +367,12 @@ class AudioPipeline:
                 elif isinstance(event, ToolCallRequest):
                     tool_call_requests.append(event)
 
-            # バッファが6文字未満でストリーム終了した場合のSKIP判定
-            if is_group and not skip_checked and skip_buffer:
+            # バッファがプレフィックス長未満でストリーム終了した場合のSKIP判定
+            if check_skip_prefix and not skip_checked and skip_buffer:
                 skip_checked = True
-                if skip_buffer.strip().startswith("[SKIP]"):
+                if skip_buffer.strip().startswith(check_skip_prefix):
                     skipped = True
-                    logger.info("グループモード: SKIP判定 → TTS合成スキップ")
+                    logger.info(f"SKIP判定 ({check_skip_prefix}) → TTS合成スキップ")
                 elif not skipped:
                     full_response += skip_buffer
                     logger.info(f"TTS合成: '{skip_buffer}'")
@@ -667,6 +672,68 @@ class AudioPipeline:
         await self.generate_from_text(
             "[ボタン押下] ユーザーがボタンを押しました。反応してください。"
         )
+
+    async def generate_autonomous(self, goals_summary: str) -> None:
+        """目標に基づいて自律的に思考・行動する。[PASS]出力時はTTSスキップ。"""
+        tts_end_sent = False
+        try:
+            if self._device_sleeping:
+                return
+
+            async with self._pipeline_lock:
+                now = datetime.now()
+
+                autonomous_instruction = (
+                    "あなたには以下の目標があります:\n"
+                    f"{goals_summary}\n\n"
+                    "現在の状況、会話の履歴、記憶を踏まえて、次に何をするか自分で判断してください。\n"
+                    "- ユーザーに話しかけたいことがあれば、自然に話しかけてください\n"
+                    "- 調べものやメモなど、やりたいことがあればツールを使ってください\n"
+                    "- 目標の追加・更新・完了もできます\n"
+                    "- 特にやることがなければ「[PASS]」とだけ出力してください"
+                )
+
+                user_msg = (
+                    f"[自律思考] 現在{now.strftime('%Y年%m月%d日 %H時%M分')}です。"
+                    "目標を確認し、自由に行動してください。"
+                )
+
+                skill_context = ""
+                if self.skill_provider:
+                    skill_context = await self.skill_provider.retrieve(
+                        user_msg,
+                        available_tools=self._available_tool_names(),
+                    )
+
+                system_prompt = self._build_system_prompt(
+                    skill_context, extra_instruction=autonomous_instruction,
+                )
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(
+                    {
+                        "role": h["role"],
+                        "content": f"[{h['created_at']}] {h['content']}" if h["role"] == "user" and h.get("created_at") else h["content"],
+                    }
+                    for h in self._history
+                )
+                messages.append({"role": "user", "content": user_msg})
+
+                self._interrupted = False
+                await self._process_llm_and_tts(
+                    messages, user_msg, skip_prefix="[PASS]",
+                )
+                tts_end_sent = True
+
+        except asyncio.CancelledError:
+            logger.info("自律行動タスクキャンセル")
+            raise
+        except Exception as e:
+            logger.error(f"自律行動エラー: {e}", exc_info=True)
+        finally:
+            if not tts_end_sent and not self._ws_closed:
+                header = make_header(MSG_TTS_END, self._next_seq(), 0)
+                await self._safe_send(header)
+                logger.info("TTS_END送信 (自律行動エラーリカバリ)")
 
     async def generate_from_text(self, text: str) -> None:
         """ASRをスキップし、指定テキストを直接LLM→TTS処理する（通知用）。"""

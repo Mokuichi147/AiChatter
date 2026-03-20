@@ -35,6 +35,7 @@ class VoiceConfig:
 class PersonaConfig:
     name: str = ""
     system_prompt: str = "あなたは役立つ日本語アシスタントです。簡潔に、2〜3文で答えてください。"
+    goals: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -62,6 +63,7 @@ def load_character(yaml_path: str) -> CharacterConfig:
     persona = PersonaConfig(
         name=persona_data.get("name", ""),
         system_prompt=persona_data.get("system_prompt", PersonaConfig.system_prompt),
+        goals=persona_data.get("goals", []),
     )
 
     voice = VoiceConfig(
@@ -332,6 +334,11 @@ class Settings(BaseSettings):
     # 会話モード
     conversation_mode: str = "solo"  # "solo" or "group"
     speaker_similarity_threshold: float = 0.65
+
+    # 自律行動
+    autonomous_enabled: bool = False  # 自律行動の有効化フラグ
+    autonomous_interval: int = 600  # 自律思考の間隔 (秒)
+    autonomous_max_consecutive: int = 3  # ユーザー応答なしの連続行動上限
 
     # バッテリー監視
     battery_low_threshold: int = 20  # 低バッテリー通知閾値 (%)

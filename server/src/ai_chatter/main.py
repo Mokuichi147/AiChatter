@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import struct
+import time
 import uuid
 from pathlib import Path
 from typing import AsyncIterator
@@ -68,6 +69,10 @@ _chat_engine: ChatEngine | None = None
 
 # アクティブなパイプライン管理
 _active_pipelines: list = []
+
+# 自律行動: 最後のユーザー活動時刻とユーザー応答なしの連続行動カウント
+_last_activity_time: float = 0.0
+_autonomous_consecutive_count: int = 0
 
 
 class StrictModel(BaseModel):
@@ -242,6 +247,7 @@ async def _notification_scheduler() -> None:
                     await pipeline.generate_from_text(message)
                 except Exception as e:
                     logger.error(f"通知送信エラー: {e}", exc_info=True)
+            _last_activity_time = time.monotonic()
 
 
 async def _subagent_result_scheduler() -> None:
@@ -270,6 +276,8 @@ async def _subagent_result_scheduler() -> None:
                     logger.error(f"サブエージェント結果通知エラー: {e}", exc_info=True)
             if not delivered:
                 undelivered.append(message)
+            else:
+                _last_activity_time = time.monotonic()
 
         if undelivered:
             await _subagent_job_manager.requeue_completed_messages(undelivered)
@@ -355,6 +363,39 @@ def _detect_battery_event(
             return "low"
 
     return None
+
+
+async def _autonomous_action_scheduler() -> None:
+    """キャラクターの目標に基づいて自律的に思考・行動するスケジューラー。"""
+    global _last_activity_time, _autonomous_consecutive_count
+    _last_activity_time = time.monotonic()
+
+    while True:
+        await asyncio.sleep(30)
+        if not settings.autonomous_enabled or not _active_pipelines:
+            continue
+        if _tool_factory is None or not hasattr(_tool_factory, "goal_store"):
+            continue
+
+        elapsed = time.monotonic() - _last_activity_time
+        if elapsed < settings.autonomous_interval:
+            continue
+
+        if _autonomous_consecutive_count >= settings.autonomous_max_consecutive:
+            continue
+
+        goals_summary = _tool_factory.goal_store.active_goals_summary()
+        if not goals_summary:
+            continue
+
+        _last_activity_time = time.monotonic()
+        _autonomous_consecutive_count += 1
+
+        for pipeline in list(_active_pipelines):
+            try:
+                await pipeline.generate_autonomous(goals_summary)
+            except Exception as e:
+                logger.error(f"自律行動エラー: {e}", exc_info=True)
 
 
 @app.on_event("startup")
@@ -480,7 +521,7 @@ async def startup_event() -> None:
             skill_provider=_skill_provider,
         )
 
-        # 通知スケジューラー起動
+        # スケジューラー起動
         _scheduler_tasks = [
             asyncio.create_task(_notification_scheduler(), name="notification_scheduler"),
             asyncio.create_task(
@@ -488,6 +529,9 @@ async def startup_event() -> None:
             ),
             asyncio.create_task(
                 _battery_monitor_scheduler(), name="battery_monitor_scheduler"
+            ),
+            asyncio.create_task(
+                _autonomous_action_scheduler(), name="autonomous_action_scheduler"
             ),
         ]
 
@@ -795,6 +839,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if msg_type == MSG_AUDIO_CHUNK:
                     await pipeline.process_audio_chunk(payload)
                 elif msg_type == MSG_EOS:
+                    # ユーザー発話 → 自律行動タイマーリセット
+                    _last_activity_time = time.monotonic()
+                    _autonomous_consecutive_count = 0
                     logger.info(f"EOS受信 (seq={seq})")
                     await pipeline.process_end_of_speech()
                 elif msg_type == MSG_INTERRUPT:
