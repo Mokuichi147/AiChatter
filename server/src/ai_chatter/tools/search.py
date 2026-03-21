@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime, date
 from pathlib import Path
 from threading import Lock
@@ -11,6 +12,48 @@ from ai_chatter.tools.base import ToolBase, ToolResult
 from ai_chatter._paths import SERVER_ROOT
 
 logger = logging.getLogger(__name__)
+
+# --- URL取得 ---
+
+_URL_PATTERN = re.compile(r"^https?://\S+$")
+
+
+def _is_url(text: str) -> bool:
+    """テキストがURLかどうかを判定する。"""
+    return bool(_URL_PATTERN.match(text.strip()))
+
+
+async def _fetch_url(url: str) -> str:
+    """URLのページ内容をテキストとして取得する。"""
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        resp = await client.get(
+            url,
+            headers={"User-Agent": "AiChatter/1.0"},
+        )
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("content-type", "")
+        if "text/html" in content_type:
+            return _html_to_text(resp.text)
+        if "text/" in content_type or "json" in content_type or "xml" in content_type:
+            return resp.text
+        return f"(バイナリコンテンツ: {content_type})"
+
+
+def _html_to_text(html: str) -> str:
+    """HTMLからテキストを抽出する（軽量実装）。"""
+    # script, style タグの中身を除去
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    # HTMLタグを除去
+    text = re.sub(r"<[^>]+>", " ", text)
+    # HTMLエンティティをデコード
+    import html as html_module
+    text = html_module.unescape(text)
+    # 連続する空白を整理
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()[:10000]
+
 
 # --- エンジン定義 ---
 
@@ -220,13 +263,13 @@ def _get_tracker() -> SearchUsageTracker:
 
 class SearchTool(ToolBase):
     name = "web_search"
-    description = "Webで最新情報を調べます。ニュース・天気・時事・価格など、変化しやすい情報が必要なときに使います。"
+    description = "Webで最新情報を調べます。検索クエリまたはURLを指定できます。URLの場合はページ内容を取得します。"
     input_schema = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "検索クエリ",
+                "description": "検索クエリまたはURL",
             },
         },
         "required": ["query"],
@@ -236,6 +279,16 @@ class SearchTool(ToolBase):
         query = kwargs.get("query", "")
         if not query:
             return ToolResult(content="queryは必須です", is_error=True)
+
+        # URLが渡された場合はページ内容を取得
+        if _is_url(query):
+            try:
+                logger.info(f"URL取得: {query}")
+                content = await _fetch_url(query)
+                return ToolResult(content=content)
+            except Exception as e:
+                logger.warning(f"URL取得エラー: {e}")
+                return ToolResult(content=f"URLの取得に失敗しました: {e}", is_error=True)
 
         tracker = _get_tracker()
         engines = _select_engine(tracker)
