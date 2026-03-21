@@ -307,6 +307,7 @@ def server(
         host=settings.host,
         port=settings.port,
         log_level="info",
+        ws="wsproto",
         ws_ping_interval=10,
         ws_ping_timeout=10,
     )
